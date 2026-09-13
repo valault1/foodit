@@ -19,3 +19,12 @@ npm-debug.log*
 .idea/
 .vscode/
 *.tsbuildinfo
+.vercel
+
+# Added by the Vercel CLI. `.env*` is deliberately broad — it catches
+# `.env.production`, `.env.local` and anything else pulled from Vercel — so the
+# example files, which are documentation and *must* stay committable, are
+# re-included below.
+.env*
+!.env.example
+!*.env.example
