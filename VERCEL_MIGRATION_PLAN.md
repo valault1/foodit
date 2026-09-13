@@ -105,12 +105,14 @@ serverless function, and the **database** moves to hosted Postgres.
 
 - Create **`/api/index.ts`** at the **repo root** (this is the Vercel Function):
   ```ts
-  import app from "../server/src/app";
+  import app from "../server/src/app.js";
   export default app; // an Express app is a valid (req, res) handler
   ```
-- **Gotcha:** Vercel builds functions with esbuild on Node. Remove explicit **`.ts`
-  extensions** from import specifiers in server code (Bun allows them; the Vercel/Node
-  build generally does not). Use extensionless imports (`from "./db"`).
+- **Gotcha:** Vercel runs this function as **native ESM on Node** and does not bundle
+  it, so relative imports need an explicit **`.js`** extension (`from "./db.js"`) —
+  extensionless throws `ERR_MODULE_NOT_FOUND` at runtime, and explicit `.ts` is
+  rejected by the build. The `.js` points at the compiled output; Bun and `tsc`
+  (`moduleResolution: "bundler"`) still resolve it to the `.ts` source. See ADR-009.
 - Keep the server `tsconfig` valid for Node builds (module resolution, no
   `allowImportingTsExtensions` reliance for the Vercel path).
 
@@ -215,7 +217,8 @@ serverless function, and the **database** moves to hosted Postgres.
 - **Placeholders:** Postgres uses `$1,$2`; there is no `?`. `.changes` → `rowCount`.
 - **Serverless connections:** use `@vercel/postgres`'s pool (built for serverless);
   don't hold a long-lived global connection or run `PRAGMA`.
-- **Import extensions:** drop `.ts` from server imports for the Vercel/Node build (A4).
+- **Import extensions:** relative server imports need an explicit `.js` extension for
+  the native-ESM Vercel/Node runtime (never `.ts`, never extensionless) (A4, ADR-009).
 - **Cookies:** same-origin in prod (client + API both on `foodit.valault.com`), so the
   `foodit_session` cookie "just works"; keep `secure` in prod + `app.set('trust proxy',1)`.
 - **No prod data migration** — schema is created fresh; the old SQLite data is disposable.

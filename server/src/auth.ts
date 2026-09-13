@@ -8,7 +8,7 @@ import {
   markInviteAccepted,
   getUserById,
   type User,
-} from "./db";
+} from "./db.js";
 
 // --- Tunables ----------------------------------------------------------------
 

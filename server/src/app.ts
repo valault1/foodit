@@ -15,7 +15,7 @@ import {
   deleteInvite,
   getUserByEmail,
   type User,
-} from "./db";
+} from "./db.js";
 import {
   SESSION_COOKIE,
   SESSION_TTL_MS,
@@ -25,7 +25,7 @@ import {
   getSessionUser,
   destroySession,
   sendLoginCodeEmail,
-} from "./auth";
+} from "./auth.js";
 
 // Make the authenticated user available on the request.
 declare global {

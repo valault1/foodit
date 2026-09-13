@@ -5,7 +5,7 @@
 // It creates every table + index if missing and is safe to re-run (all DDL is
 // `IF NOT EXISTS`). Never run this on the request path. See A3 / Part B step 4.
 import { createPool } from "@vercel/postgres";
-import { migrate } from "../src/schema";
+import { migrate } from "../src/schema.js";
 
 async function main() {
   if (!process.env.POSTGRES_URL) {
