@@ -1,15 +1,21 @@
-# v0 sandbox internal files
-__v0_runtime_loader.js
-__v0_devtools.tsx
-__v0_jsx-dev-runtime.ts
-.snowflake/
-.v0-trash/
-.vercel/
+node_modules/
+dist/
+build/
 
-# Environment variables
-.env*.local
+# Local database (SQLite) — see ADR-001
+server/data/
 
-# Common ignores
-node_modules
-.next/
+# Logs
+*.log
+npm-debug.log*
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
 .DS_Store
+.idea/
+.vscode/
+*.tsbuildinfo
