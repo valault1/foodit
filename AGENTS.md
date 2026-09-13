@@ -176,9 +176,13 @@ function and falls back all other paths to `index.html` (SPA routing).
 - `app.ts` builds and exports the app; `server/src/index.ts` (`app.listen`) is
   now **local dev only**. `app.set("trust proxy", 1)` so `secure` session
   cookies work behind Vercel's TLS edge.
-- **Production runtime is Node** (`nodejs20.x`), not Bun. Server code therefore
-  avoids Bun-only APIs and uses **extensionless imports** (`from "./db"`), which
-  the Vercel/esbuild Node build requires (Bun tolerated `.ts`).
+- **Production runtime is Node**, not Bun. Vercel auto-detects `api/index.ts` as
+  a Node function — do **not** set `functions.runtime` in `vercel.json` to
+  `nodejs20.x` (that field wants an npm runtime package like `@vercel/node@x` and
+  errors on the version string: "Function Runtimes must have a valid version").
+  The Node major is pinned via `engines.node` in the root `package.json` instead.
+  Server code therefore avoids Bun-only APIs and uses **extensionless imports**
+  (`from "./db"`), which the Vercel/esbuild Node build requires (Bun tolerated `.ts`).
 - Same-origin in prod (client + API both on `foodit.valault.com`), so the
   `foodit_session` cookie needs no cross-site handling.
 - Vercel detects `bun.lock` and uses Bun for install/build (`bun run build`);

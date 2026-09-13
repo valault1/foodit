@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": ["client", "server"],
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "bun run --filter '*' dev",
     "dev:client": "bun run --cwd client dev",
