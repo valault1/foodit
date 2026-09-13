@@ -85,17 +85,40 @@ keeps the write path trivial (a recipe is one row).
 **Trade-off / revisit when:** Datasets grow or we need fast tag facets / full-text
 search — then normalize into `tags` / `ingredients` tables and/or add SQLite FTS5.
 
-### ADR-004 — Auth is passwordless email codes, deferred to slice 2
-**Decision:** Households + users are modeled in the schema from the start, but the
-first slice runs against a single seeded default household with no login wall.
-Real auth (email one-time codes, invites, 90-day refreshing sessions) lands next.
-**Why:** The recipe core is the primary value and is fully testable without auth.
-Email-code login also needs an email provider decision (see Open questions).
-**How it will work (planned):**
-- Admin invites an email → invite row created → invitee receives a code/link.
-- Login: enter email → server emails a 6-digit code → verify → issue a session
-  token (httpOnly cookie), valid ~90 days, refreshed (sliding expiry) on use.
-- No passwords stored, ever.
+### ADR-004 — Passwordless email-code auth (implemented in slice 2)
+**Decision:** No passwords. Login = enter email → server emails a 6-digit code →
+verify → issue a session. Implemented in `server/src/auth.ts`.
+**Details:**
+- Codes: 6 digits, hashed (sha256) in `login_codes`, 10-minute expiry, max 5
+  attempts, single outstanding code per email (a new request burns the old one).
+- Sessions: opaque 32-byte token, sha256-hashed in `sessions`; the raw token
+  lives in an httpOnly `foodit_session` cookie (`sameSite=lax`, `secure` in prod).
+- 90-day **sliding** expiry (ADR-006): every authenticated request pushes the
+  expiry to now+90d, so active users stay logged in and inactive ones lapse.
+
+### ADR-005 — Self-serve household creation on first login
+**Decision:** On a verified login, an unknown email creates a **new household**
+with that user as its **admin**. An email with a pending invite joins the
+inviter's household (with the invited role). Existing users just sign in.
+**Why:** Someone has to be the first admin; self-serve bootstrapping avoids a
+manual seeding step and makes the app multi-tenant (each household is isolated).
+**Revisit when:** We want invite-only signup — then reject unknown emails that
+have no pending invite instead of creating a household.
+
+### ADR-006 — Sliding 90-day sessions (see ADR-004 for mechanics)
+**Decision:** Sessions expire 90 days after last use, refreshed on every
+authenticated request, rather than a fixed 90-day-from-login window.
+**Why:** Matches the "keep users logged in for a long time with automatic
+refresh" requirement — regular users effectively never get logged out.
+
+### ADR-007 — Resend for email, with a console fallback
+**Decision:** Send login codes via Resend's HTTP API (no SDK dependency — a plain
+`fetch`). If `RESEND_API_KEY` is unset, the server logs the code to the console.
+**Why:** Zero-dependency, and the console fallback means local dev works with no
+key. Config lives in `server/.env` (git-ignored); see `server/.env.example`.
+**Note:** The shared `onboarding@resend.dev` sender is fine for testing but
+Resend restricts who it can email; sending to real household members needs a
+verified domain in Resend (set `FOODIT_FROM_EMAIL`).
 
 ---
 
@@ -106,15 +129,18 @@ Email-code login also needs an email provider decision (see Open questions).
   - API: `GET/POST /api/recipes`, `GET/PUT/DELETE /api/recipes/:id`, `GET /api/tags`.
   - UI: list/search (`RecipeListPage`), add/edit (`RecipeFormPage`), detail with
     inline-editable notes (`RecipeDetailPage`); `StarRating`, `TagInput`, `RecipeCard`.
-- [ ] **Slice 2** — Auth: households, email-code login, invites, 90-day sliding sessions.
+- [x] **Slice 2** — Auth: passwordless email-code login, households, invites,
+      90-day sliding sessions. Server: `auth.ts`, `/api/auth/*`, `/api/household*`,
+      recipes now scoped to the signed-in user's household. Client: `auth.tsx`
+      context, `LoginPage`, `HouseholdPage`, header user menu; app gated on login.
 - [ ] **Slice 3** — Polish & extras: refinements driven by real use.
 
 ---
 
 ## Open questions (need a decision before the relevant slice)
 
-- **Email provider** for login codes (Resend / Postmark / SES / …). Until chosen,
-  slice 2 will log codes to the server console (dev stub).
+- ~~Email provider for login codes~~ → **Resolved: Resend** (ADR-007). Key goes in
+  `server/.env`. For emailing real household members, verify a domain in Resend.
 - **Production hosting** for a long-running Express server (Vercel is serverless-
   oriented). Options: static client + serverless functions, or Railway/Render/Fly
   for the server. Ties into ADR-001 (Postgres migration).

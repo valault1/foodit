@@ -34,3 +34,37 @@ export interface RecipeInput {
   rating?: number | null;
   tags?: string[];
 }
+
+// --- Auth ------------------------------------------------------------------
+
+export type Role = "admin" | "member";
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  householdId: string;
+}
+
+export interface Household {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface Invite {
+  id: string;
+  householdId: string;
+  email: string;
+  role: Role;
+  invitedBy: string | null;
+  createdAt: string;
+  acceptedAt: string | null;
+}
+
+export interface HouseholdInfo {
+  household: Household | null;
+  members: AuthUser[];
+  invites: Invite[];
+}

@@ -1,8 +1,17 @@
-import type { Recipe, RecipeInput } from "./types";
+import type {
+  AuthUser,
+  Household,
+  HouseholdInfo,
+  Invite,
+  Recipe,
+  RecipeInput,
+  Role,
+} from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     headers: { "Content-Type": "application/json" },
+    credentials: "include", // send/receive the session cookie
     ...init,
   });
 
@@ -63,5 +72,46 @@ export const api = {
 
   listTags(): Promise<string[]> {
     return request<{ tags: string[] }>("/tags").then((r) => r.tags);
+  },
+
+  // --- Auth ---------------------------------------------------------------
+
+  me(): Promise<{ user: AuthUser | null; household?: Household | null }> {
+    return request("/me");
+  },
+
+  requestCode(email: string): Promise<{ ok: true }> {
+    return request("/auth/request-code", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  verifyCode(email: string, code: string): Promise<AuthUser> {
+    return request<{ user: AuthUser }>("/auth/verify", {
+      method: "POST",
+      body: JSON.stringify({ email, code }),
+    }).then((r) => r.user);
+  },
+
+  logout(): Promise<void> {
+    return request("/auth/logout", { method: "POST" });
+  },
+
+  // --- Household ----------------------------------------------------------
+
+  getHousehold(): Promise<HouseholdInfo> {
+    return request("/household");
+  },
+
+  createInvite(email: string, role: Role): Promise<Invite> {
+    return request<{ invite: Invite }>("/household/invites", {
+      method: "POST",
+      body: JSON.stringify({ email, role }),
+    }).then((r) => r.invite);
+  },
+
+  deleteInvite(id: string): Promise<void> {
+    return request<void>(`/household/invites/${id}`, { method: "DELETE" });
   },
 };

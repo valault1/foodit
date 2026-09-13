@@ -71,24 +71,46 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_recipes_household ON recipes(household_id);
+
+  -- Passwordless login: short-lived one-time codes emailed to a user.
+  CREATE TABLE IF NOT EXISTS login_codes (
+    id         TEXT PRIMARY KEY,
+    email      TEXT NOT NULL,
+    code_hash  TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_login_codes_email ON login_codes(email);
+
+  -- Long-lived sessions with sliding expiry (~90 days, refreshed on use).
+  CREATE TABLE IF NOT EXISTS sessions (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    token_hash   TEXT NOT NULL UNIQUE,
+    expires_at   TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+
+  -- Pending invitations: an admin invites an email into their household.
+  CREATE TABLE IF NOT EXISTS invites (
+    id           TEXT PRIMARY KEY,
+    household_id TEXT NOT NULL REFERENCES households(id),
+    email        TEXT NOT NULL,
+    role         TEXT NOT NULL DEFAULT 'member',
+    invited_by   TEXT REFERENCES users(id),
+    created_at   TEXT NOT NULL,
+    accepted_at  TEXT,
+    UNIQUE(household_id, email)
+  );
+  CREATE INDEX IF NOT EXISTS idx_invites_email ON invites(email);
 `);
 
-// --- Default household (until real auth lands; see ADR-004) ------------------
-
-export const DEFAULT_HOUSEHOLD_ID = "default-household";
-
-{
-  const exists = db
-    .query("SELECT id FROM households WHERE id = ?")
-    .get(DEFAULT_HOUSEHOLD_ID);
-  if (!exists) {
-    db.query("INSERT INTO households (id, name, created_at) VALUES (?, ?, ?)").run(
-      DEFAULT_HOUSEHOLD_ID,
-      "My Household",
-      new Date().toISOString()
-    );
-  }
-}
+// The raw database handle, shared with the auth module (server/src/auth.ts).
+export { db };
 
 // --- Row mapping -------------------------------------------------------------
 
@@ -282,4 +304,187 @@ export function listTags(householdId: string): string[] {
   const set = new Set<string>();
   for (const r of recipes) for (const t of r.tags) set.add(t);
   return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+// ============================================================================
+// Auth: households, users, invites (login codes + sessions live in auth.ts)
+// ============================================================================
+
+export type Role = "admin" | "member";
+
+export interface Household {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface User {
+  id: string;
+  householdId: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  createdAt: string;
+}
+
+export interface Invite {
+  id: string;
+  householdId: string;
+  email: string;
+  role: Role;
+  invitedBy: string | null;
+  createdAt: string;
+  acceptedAt: string | null;
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+interface UserRow {
+  id: string;
+  household_id: string;
+  email: string;
+  name: string | null;
+  role: string;
+  created_at: string;
+}
+
+function rowToUser(row: UserRow): User {
+  return {
+    id: row.id,
+    householdId: row.household_id,
+    email: row.email,
+    name: row.name,
+    role: (row.role as Role) ?? "member",
+    createdAt: row.created_at,
+  };
+}
+
+export function getUserByEmail(email: string): User | null {
+  const row = db
+    .query("SELECT * FROM users WHERE email = ?")
+    .get(normalizeEmail(email)) as UserRow | null;
+  return row ? rowToUser(row) : null;
+}
+
+export function getUserById(id: string): User | null {
+  const row = db.query("SELECT * FROM users WHERE id = ?").get(id) as UserRow | null;
+  return row ? rowToUser(row) : null;
+}
+
+export function listHouseholdMembers(householdId: string): User[] {
+  const rows = db
+    .query("SELECT * FROM users WHERE household_id = ? ORDER BY created_at ASC")
+    .all(householdId) as UserRow[];
+  return rows.map(rowToUser);
+}
+
+export function getHousehold(id: string): Household | null {
+  const row = db.query("SELECT * FROM households WHERE id = ?").get(id) as
+    | { id: string; name: string; created_at: string }
+    | null;
+  return row ? { id: row.id, name: row.name, createdAt: row.created_at } : null;
+}
+
+/** Create a brand-new household with its first user as admin. */
+export function createHouseholdWithAdmin(email: string, name?: string): User {
+  const now = new Date().toISOString();
+  const householdId = crypto.randomUUID();
+  const userId = crypto.randomUUID();
+
+  const tx = db.transaction(() => {
+    db.query("INSERT INTO households (id, name, created_at) VALUES (?, ?, ?)").run(
+      householdId,
+      name?.trim() || "My Household",
+      now
+    );
+    db.query(
+      "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES (?, ?, ?, ?, 'admin', ?)"
+    ).run(userId, householdId, normalizeEmail(email), name?.trim() || null, now);
+  });
+  tx();
+
+  return getUserById(userId)!;
+}
+
+export function createUser(householdId: string, email: string, role: Role): User {
+  const now = new Date().toISOString();
+  const userId = crypto.randomUUID();
+  db.query(
+    "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES (?, ?, ?, NULL, ?, ?)"
+  ).run(userId, householdId, normalizeEmail(email), role, now);
+  return getUserById(userId)!;
+}
+
+// --- Invites ---------------------------------------------------------------
+
+interface InviteRow {
+  id: string;
+  household_id: string;
+  email: string;
+  role: string;
+  invited_by: string | null;
+  created_at: string;
+  accepted_at: string | null;
+}
+
+function rowToInvite(row: InviteRow): Invite {
+  return {
+    id: row.id,
+    householdId: row.household_id,
+    email: row.email,
+    role: (row.role as Role) ?? "member",
+    invitedBy: row.invited_by,
+    createdAt: row.created_at,
+    acceptedAt: row.accepted_at,
+  };
+}
+
+export function getPendingInviteByEmail(email: string): Invite | null {
+  const row = db
+    .query("SELECT * FROM invites WHERE email = ? AND accepted_at IS NULL")
+    .get(normalizeEmail(email)) as InviteRow | null;
+  return row ? rowToInvite(row) : null;
+}
+
+export function createInvite(
+  householdId: string,
+  email: string,
+  role: Role,
+  invitedBy: string
+): Invite {
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  // Re-inviting the same email refreshes the pending invite rather than erroring.
+  db.query(
+    `INSERT INTO invites (id, household_id, email, role, invited_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(household_id, email) DO UPDATE SET
+       role = excluded.role, invited_by = excluded.invited_by,
+       created_at = excluded.created_at, accepted_at = NULL`
+  ).run(id, householdId, normalizeEmail(email), role, invitedBy, now);
+  return getPendingInviteByEmail(email)!;
+}
+
+export function listPendingInvites(householdId: string): Invite[] {
+  const rows = db
+    .query(
+      "SELECT * FROM invites WHERE household_id = ? AND accepted_at IS NULL ORDER BY created_at ASC"
+    )
+    .all(householdId) as InviteRow[];
+  return rows.map(rowToInvite);
+}
+
+export function markInviteAccepted(householdId: string, email: string): void {
+  db.query(
+    "UPDATE invites SET accepted_at = ? WHERE household_id = ? AND email = ?"
+  ).run(new Date().toISOString(), householdId, normalizeEmail(email));
+}
+
+export function deleteInvite(householdId: string, id: string): boolean {
+  const result = db
+    .query("DELETE FROM invites WHERE household_id = ? AND id = ? AND accepted_at IS NULL")
+    .run(householdId, id);
+  return result.changes > 0;
 }
