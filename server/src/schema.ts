@@ -25,7 +25,7 @@ export async function migrate(pool: VercelPool): Promise<void> {
       household_id TEXT NOT NULL REFERENCES households(id),
       email        TEXT NOT NULL UNIQUE,
       name         TEXT,
-      role         TEXT NOT NULL DEFAULT 'member', -- 'admin' | 'member'
+      role         TEXT NOT NULL DEFAULT 'member', -- 'super_admin' | 'admin' | 'member'
       created_at   TEXT NOT NULL
     );
   `);
@@ -94,4 +94,21 @@ export async function migrate(pool: VercelPool): Promise<void> {
     );
   `);
   await pool.query("CREATE INDEX IF NOT EXISTS idx_invites_email ON invites(email);");
+
+  // App-level invitations: a super admin lets an email sign up at all. Unlike
+  // `invites` these carry no household — the invitee gets their own on first
+  // login (ADR-010). Signup is invite-only, so a row here (or in `invites`, or
+  // an existing user, or the super-admin allowlist) is what permits a login.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_invites (
+      id          TEXT PRIMARY KEY,
+      email       TEXT NOT NULL UNIQUE,
+      invited_by  TEXT REFERENCES users(id),
+      created_at  TEXT NOT NULL,
+      accepted_at TEXT
+    );
+  `);
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS idx_app_invites_email ON app_invites(email);"
+  );
 }

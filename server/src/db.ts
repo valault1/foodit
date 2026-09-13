@@ -250,7 +250,20 @@ export async function listTags(householdId: string): Promise<string[]> {
 // Auth: households, users, invites (login codes + sessions live in auth.ts)
 // ============================================================================
 
-export type Role = "admin" | "member";
+/**
+ * `super_admin` is app-level (see ADR-010): it implies household `admin`
+ * everywhere, and additionally allows inviting people to the app itself. Use
+ * `isHouseholdAdmin` rather than comparing to "admin" directly.
+ */
+export type Role = "super_admin" | "admin" | "member";
+
+export function isHouseholdAdmin(user: { role: Role }): boolean {
+  return user.role === "admin" || user.role === "super_admin";
+}
+
+export function isSuperAdmin(user: { role: Role }): boolean {
+  return user.role === "super_admin";
+}
 
 export interface Household {
   id: string;
@@ -329,10 +342,14 @@ export async function getHousehold(id: string): Promise<Household | null> {
   return row ? { id: row.id, name: row.name, createdAt: row.created_at } : null;
 }
 
-/** Create a brand-new household with its first user as admin. */
+/**
+ * Create a brand-new household with its first user as its admin. `role` lets a
+ * super admin bootstrap their own household without being demoted to "admin".
+ */
 export async function createHouseholdWithAdmin(
   email: string,
-  name?: string
+  name?: string,
+  role: Role = "admin"
 ): Promise<User> {
   const now = new Date().toISOString();
   const householdId = crypto.randomUUID();
@@ -346,8 +363,8 @@ export async function createHouseholdWithAdmin(
       [householdId, name?.trim() || "My Household", now]
     );
     await client.query(
-      "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES ($1, $2, $3, $4, 'admin', $5)",
-      [userId, householdId, normalizeEmail(email), name?.trim() || null, now]
+      "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+      [userId, householdId, normalizeEmail(email), name?.trim() || null, role, now]
     );
     await client.query("COMMIT");
   } catch (err) {
@@ -443,6 +460,89 @@ export async function markInviteAccepted(
     "UPDATE invites SET accepted_at = $1 WHERE household_id = $2 AND email = $3",
     [new Date().toISOString(), householdId, normalizeEmail(email)]
   );
+}
+
+/** Keep a user's stored role in sync with the super-admin allowlist. */
+export async function setUserRole(userId: string, role: Role): Promise<void> {
+  await pool.query("UPDATE users SET role = $1 WHERE id = $2", [role, userId]);
+}
+
+// --- App invites (super-admin only) -----------------------------------------
+
+export interface AppInvite {
+  id: string;
+  email: string;
+  invitedBy: string | null;
+  createdAt: string;
+  acceptedAt: string | null;
+}
+
+interface AppInviteRow {
+  id: string;
+  email: string;
+  invited_by: string | null;
+  created_at: string;
+  accepted_at: string | null;
+}
+
+function rowToAppInvite(row: AppInviteRow): AppInvite {
+  return {
+    id: row.id,
+    email: row.email,
+    invitedBy: row.invited_by,
+    createdAt: row.created_at,
+    acceptedAt: row.accepted_at,
+  };
+}
+
+export async function getPendingAppInviteByEmail(
+  email: string
+): Promise<AppInvite | null> {
+  const { rows } = await pool.query(
+    "SELECT * FROM app_invites WHERE email = $1 AND accepted_at IS NULL",
+    [normalizeEmail(email)]
+  );
+  const row = (rows as AppInviteRow[])[0] ?? null;
+  return row ? rowToAppInvite(row) : null;
+}
+
+export async function createAppInvite(
+  email: string,
+  invitedBy: string
+): Promise<AppInvite> {
+  const now = new Date().toISOString();
+  // Re-inviting the same email refreshes the pending invite rather than erroring.
+  await pool.query(
+    `INSERT INTO app_invites (id, email, invited_by, created_at)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT(email) DO UPDATE SET
+       invited_by = excluded.invited_by, created_at = excluded.created_at,
+       accepted_at = NULL`,
+    [crypto.randomUUID(), normalizeEmail(email), invitedBy, now]
+  );
+  return (await getPendingAppInviteByEmail(email))!;
+}
+
+export async function listPendingAppInvites(): Promise<AppInvite[]> {
+  const { rows } = await pool.query(
+    "SELECT * FROM app_invites WHERE accepted_at IS NULL ORDER BY created_at ASC"
+  );
+  return (rows as AppInviteRow[]).map(rowToAppInvite);
+}
+
+export async function markAppInviteAccepted(email: string): Promise<void> {
+  await pool.query("UPDATE app_invites SET accepted_at = $1 WHERE email = $2", [
+    new Date().toISOString(),
+    normalizeEmail(email),
+  ]);
+}
+
+export async function deleteAppInvite(id: string): Promise<boolean> {
+  const result = await pool.query(
+    "DELETE FROM app_invites WHERE id = $1 AND accepted_at IS NULL",
+    [id]
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function deleteInvite(householdId: string, id: string): Promise<boolean> {

@@ -14,6 +14,12 @@ import {
   createInvite,
   deleteInvite,
   getUserByEmail,
+  isHouseholdAdmin,
+  isSuperAdmin,
+  listPendingAppInvites,
+  createAppInvite,
+  deleteAppInvite,
+  getPendingAppInviteByEmail,
   type User,
 } from "./db.js";
 import {
@@ -26,6 +32,9 @@ import {
   destroySession,
   sendLoginCodeEmail,
   sendInviteEmail,
+  sendAppInviteEmail,
+  canSignIn,
+  SignupNotAllowedError,
 } from "./auth.js";
 
 // Make the authenticated user available on the request.
@@ -106,6 +115,14 @@ app.post(
     if (!EMAIL_RE.test(email)) {
       return res.status(400).json({ error: "Please enter a valid email address." });
     }
+    // Invite-only (ADR-010). Checked here as well as on verify so we never mail
+    // a code to someone who could not use it.
+    if (!(await canSignIn(email))) {
+      return res.status(403).json({
+        error: "You need an invite to use foodit. Ask someone to invite you.",
+      });
+    }
+
     const code = await createLoginCode(email);
     try {
       await sendLoginCodeEmail(email, code);
@@ -128,7 +145,16 @@ app.post(
       return res.status(400).json({ error: "Email and code are required." });
     }
 
-    const result = await verifyLoginCode(email, code);
+    let result;
+    try {
+      result = await verifyLoginCode(email, code);
+    } catch (e) {
+      // The invite could have been revoked between requesting and verifying.
+      if (e instanceof SignupNotAllowedError) {
+        return res.status(403).json({ error: e.message });
+      }
+      throw e;
+    }
     if (!result.ok) {
       const messages: Record<string, string> = {
         no_code: "That code has expired or was already used. Request a new one.",
@@ -186,7 +212,7 @@ app.get(
     res.json({
       household: await getHousehold(hid),
       members: (await listHouseholdMembers(hid)).map(publicUser),
-      invites: req.user!.role === "admin" ? await listPendingInvites(hid) : [],
+      invites: isHouseholdAdmin(req.user!) ? await listPendingInvites(hid) : [],
     });
   })
 );
@@ -195,7 +221,7 @@ app.post(
   "/api/household/invites",
   requireAuth,
   wrap(async (req, res) => {
-    if (req.user!.role !== "admin") {
+    if (!isHouseholdAdmin(req.user!)) {
       return res.status(403).json({ error: "Only an admin can invite people." });
     }
     const email = String(req.body?.email ?? "").trim();
@@ -245,10 +271,75 @@ app.delete(
   "/api/household/invites/:id",
   requireAuth,
   wrap(async (req, res) => {
-    if (req.user!.role !== "admin") {
+    if (!isHouseholdAdmin(req.user!)) {
       return res.status(403).json({ error: "Only an admin can manage invites." });
     }
     const ok = await deleteInvite(req.user!.householdId, req.params.id);
+    if (!ok) return res.status(404).json({ error: "Invite not found" });
+    res.status(204).end();
+  })
+);
+
+// ============================================================================
+// App invites (super admin only) — who may sign up at all. See ADR-010.
+// ============================================================================
+
+function requireSuperAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!req.user) return res.status(401).json({ error: "Not signed in" });
+  if (!isSuperAdmin(req.user)) {
+    return res.status(403).json({ error: "Only a super admin can do that." });
+  }
+  next();
+}
+
+app.get(
+  "/api/app-invites",
+  requireSuperAdmin,
+  wrap(async (_req, res) => {
+    res.json({ appInvites: await listPendingAppInvites() });
+  })
+);
+
+app.post(
+  "/api/app-invites",
+  requireSuperAdmin,
+  wrap(async (req, res) => {
+    const email = String(req.body?.email ?? "").trim();
+    if (!EMAIL_RE.test(email)) {
+      return res.status(400).json({ error: "Please enter a valid email address." });
+    }
+
+    if (await getUserByEmail(email)) {
+      return res.status(409).json({ error: "That email already has an account." });
+    }
+    if (await getPendingAppInviteByEmail(email)) {
+      return res.status(409).json({ error: "That email is already invited." });
+    }
+
+    const appInvite = await createAppInvite(email, req.user!.id);
+
+    // Same rationale as household invites: the invite is what unlocks signup, so
+    // a failed send is a warning, not a failed request.
+    let emailed = true;
+    let warning: string | undefined;
+    try {
+      await sendAppInviteEmail(email, req.user!.email);
+    } catch (e) {
+      console.error("[foodit] App invite email failed:", e);
+      emailed = false;
+      warning =
+        "They can now sign up, but we couldn't email them. Send them the link yourself.";
+    }
+
+    res.status(201).json({ appInvite, emailed, warning });
+  })
+);
+
+app.delete(
+  "/api/app-invites/:id",
+  requireSuperAdmin,
+  wrap(async (req, res) => {
+    const ok = await deleteAppInvite(req.params.id);
     if (!ok) return res.status(404).json({ error: "Invite not found" });
     res.status(204).end();
   })

@@ -2,7 +2,13 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import type { HouseholdInfo } from "../types";
+import type { AppInvite, HouseholdInfo, Role } from "../types";
+
+const ROLE_LABELS: Record<Role, string> = {
+  super_admin: "owner",
+  admin: "admin",
+  member: "member",
+};
 
 export function HouseholdPage() {
   const { user } = useAuth();
@@ -15,7 +21,9 @@ export function HouseholdPage() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteNotice, setInviteNotice] = useState<string | null>(null);
 
-  const isAdmin = user?.role === "admin";
+  // super_admin implies household admin (see ADR-010).
+  const isAdmin = user?.role === "admin" || user?.role === "super_admin";
+  const isSuperAdmin = user?.role === "super_admin";
 
   async function load() {
     try {
@@ -79,7 +87,9 @@ export function HouseholdPage() {
                 <span className="member-email">{m.email}</span>
                 {m.id === user?.id && <span className="member-you">you</span>}
               </div>
-              <span className={`role-badge role-badge--${m.role}`}>{m.role}</span>
+              <span className={`role-badge role-badge--${m.role}`}>
+                {ROLE_LABELS[m.role]}
+              </span>
             </li>
           ))}
         </ul>
@@ -133,6 +143,106 @@ export function HouseholdPage() {
           )}
         </section>
       )}
+
+      {isSuperAdmin && <AppInviteSection />}
     </div>
+  );
+}
+
+/**
+ * Super-admin only: invite someone to foodit itself. They don't join this
+ * household — they get their own on first sign-in.
+ */
+function AppInviteSection() {
+  const [invites, setInvites] = useState<AppInvite[]>([]);
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      setInvites(await api.listAppInvites());
+    } catch {
+      // Non-fatal: the household view above is still useful without this list.
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    const target = email.trim();
+    try {
+      const { emailed, warning } = await api.createAppInvite(target);
+      setEmail("");
+      if (emailed) setNotice(`Invited ${target} to foodit.`);
+      else setError(warning ?? "Invited, but we couldn't email them.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not send invite");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revoke(id: string) {
+    await api.deleteAppInvite(id);
+    await load();
+  }
+
+  return (
+    <section className="card household-section">
+      <h2 className="section-title">Invite someone to foodit</h2>
+      <p className="invite-hint invite-hint--lead">
+        Signing up is invite-only. This lets someone create their own account and
+        household — they won't join yours.
+      </p>
+      <form className="invite-form" onSubmit={submit}>
+        <input
+          className="input"
+          type="email"
+          placeholder="their@email.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+        />
+        <button className="btn btn-primary" disabled={busy || !email.trim()}>
+          {busy ? "Inviting…" : "Invite"}
+        </button>
+      </form>
+      {error && <div className="alert alert--error">{error}</div>}
+      {notice && <div className="alert alert--success">{notice}</div>}
+
+      {invites.length > 0 && (
+        <div className="pending-invites">
+          <h3 className="pending-title">Awaiting sign-up</h3>
+          <ul className="member-list">
+            {invites.map((inv) => (
+              <li key={inv.id} className="member-row">
+                <div className="member-avatar member-avatar--pending" aria-hidden="true">
+                  ⋯
+                </div>
+                <div className="member-info">
+                  <span className="member-email">{inv.email}</span>
+                  <span className="member-you">invited</span>
+                </div>
+                <button
+                  className="link-button link-button--danger"
+                  onClick={() => revoke(inv.id)}
+                >
+                  Revoke
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   );
 }

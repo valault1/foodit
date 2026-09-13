@@ -3,10 +3,13 @@ import {
   pool,
   getUserByEmail,
   getPendingInviteByEmail,
+  getPendingAppInviteByEmail,
+  markAppInviteAccepted,
   createUser,
   createHouseholdWithAdmin,
   markInviteAccepted,
   getUserById,
+  setUserRole,
   type User,
 } from "./db.js";
 
@@ -37,6 +40,41 @@ function generateCode(): string {
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+// --- Super admins ------------------------------------------------------------
+
+/**
+ * App-level owners, by email (comma-separated in FOODIT_SUPER_ADMINS).
+ *
+ * The env var — not the database — is the source of truth, so a super admin can
+ * always get back in even against an empty database. Without this, the
+ * invite-only gate below would lock everyone out of a fresh deploy: there'd be
+ * no user to issue the first invite.
+ */
+const SUPER_ADMIN_EMAILS = new Set(
+  (process.env.FOODIT_SUPER_ADMINS ?? "valault1@gmail.com")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+export function isSuperAdminEmail(email: string): boolean {
+  return SUPER_ADMIN_EMAILS.has(normalizeEmail(email));
+}
+
+/**
+ * Signup is invite-only (ADR-010). An email may sign in if it already has an
+ * account, was invited to a household, was invited to the app by a super admin,
+ * or is itself a super admin.
+ */
+export async function canSignIn(email: string): Promise<boolean> {
+  const normalized = normalizeEmail(email);
+  if (isSuperAdminEmail(normalized)) return true;
+  if (await getUserByEmail(normalized)) return true;
+  if (await getPendingInviteByEmail(normalized)) return true;
+  if (await getPendingAppInviteByEmail(normalized)) return true;
+  return false;
 }
 
 // --- Login codes -------------------------------------------------------------
@@ -127,20 +165,61 @@ export async function verifyLoginCode(
   return { ok: true, user };
 }
 
-/** Existing user → itself. Invited email → new member. Otherwise → new household admin. */
+/** Raised when an uninvited email completes the code challenge (ADR-010). */
+export class SignupNotAllowedError extends Error {
+  constructor() {
+    super("You need an invite to use foodit. Ask someone to invite you.");
+    this.name = "SignupNotAllowedError";
+  }
+}
+
+/**
+ * Existing user → itself (role re-synced against the allowlist). Household
+ * invite → new member of that household. App invite or super admin → their own
+ * new household. Anyone else is rejected: signup is invite-only (ADR-010).
+ */
 async function resolveUserOnLogin(email: string): Promise<User> {
+  const superAdmin = isSuperAdminEmail(email);
+
   const existing = await getUserByEmail(email);
-  if (existing) return existing;
+  if (existing) return syncSuperAdminRole(existing, superAdmin);
 
   const invite = await getPendingInviteByEmail(email);
   if (invite) {
     const user = await createUser(invite.householdId, email, invite.role);
     await markInviteAccepted(invite.householdId, email);
-    return user;
+    return syncSuperAdminRole(user, superAdmin);
   }
 
-  // Self-serve: first time we've seen this email → spin up their household.
-  return createHouseholdWithAdmin(email);
+  const appInvite = await getPendingAppInviteByEmail(email);
+  if (appInvite) {
+    // Invited to the app, not to a household — they get their own (ADR-010).
+    const user = await createHouseholdWithAdmin(email, undefined, "admin");
+    await markAppInviteAccepted(email);
+    return syncSuperAdminRole(user, superAdmin);
+  }
+
+  // A super admin with no account yet bootstraps their own household.
+  if (superAdmin) return createHouseholdWithAdmin(email, undefined, "super_admin");
+
+  throw new SignupNotAllowedError();
+}
+
+/**
+ * Reconcile a user's stored role with the allowlist. Demotion targets "admin",
+ * never "member": super_admin already implied household admin, so this can only
+ * remove app-level power, never grant more inside a household.
+ */
+async function syncSuperAdminRole(user: User, shouldBeSuper: boolean): Promise<User> {
+  if (shouldBeSuper && user.role !== "super_admin") {
+    await setUserRole(user.id, "super_admin");
+    return { ...user, role: "super_admin" };
+  }
+  if (!shouldBeSuper && user.role === "super_admin") {
+    await setUserRole(user.id, "admin");
+    return { ...user, role: "admin" };
+  }
+  return user;
 }
 
 // --- Sessions ----------------------------------------------------------------
@@ -312,6 +391,60 @@ function loginEmailHtml(code: string): string {
                 background: #f4f2ee; border-radius: 12px; padding: 18px;">${code}</div>
     <p style="color: #999; font-size: 12px; margin: 20px 0 0;">
       If you didn't request this, you can safely ignore this email.
+    </p>
+  </div>`;
+}
+
+/**
+ * Tell someone a super admin has opened the app to them. Unlike a household
+ * invite this grants no membership — on first login they get their own
+ * household (ADR-010).
+ */
+export async function sendAppInviteEmail(
+  email: string,
+  invitedByEmail: string
+): Promise<void> {
+  const signInUrl = APP_URL.replace(/\/$/, "") || APP_URL;
+  const sent = await sendEmail({
+    to: email,
+    subject: `You've been invited to foodit`,
+    text:
+      `${invitedByEmail} invited you to foodit, a place to keep your recipes.\n\n` +
+      `Sign in with this email address (${email}) to get started: ${signInUrl}\n\n` +
+      `You'll get a one-time code to finish signing in — no password needed. ` +
+      `You'll start with your own recipe collection, and can invite others to share it.`,
+    html: appInviteEmailHtml({ invitedByEmail, email, signInUrl }),
+    failureMessage: "Could not send the invite email.",
+  });
+
+  if (!sent) {
+    console.log(`\n  [foodit] App invite for ${email} — sign in at ${signInUrl}\n`);
+  }
+}
+
+function appInviteEmailHtml(opts: {
+  invitedByEmail: string;
+  email: string;
+  signInUrl: string;
+}): string {
+  return `
+  <div style="font-family: system-ui, sans-serif; max-width: 420px; margin: 0 auto; padding: 24px;">
+    <h1 style="font-size: 20px; margin: 0 0 8px;">You're invited to foodit</h1>
+    <p style="color: #555; margin: 0 0 20px;">
+      ${escapeHtml(opts.invitedByEmail)} invited you to foodit — a simple place to
+      keep and share recipes.
+    </p>
+    <div style="text-align: center; margin: 0 0 20px;">
+      <a href="${escapeHtml(opts.signInUrl)}"
+         style="display: inline-block; background: #1f1d1a; color: #fff; text-decoration: none;
+                font-weight: 600; border-radius: 12px; padding: 14px 28px;">Get started</a>
+    </div>
+    <p style="color: #555; margin: 0;">
+      Sign in with <strong>${escapeHtml(opts.email)}</strong> and we'll email you a
+      one-time code — no password needed.
+    </p>
+    <p style="color: #999; font-size: 12px; margin: 20px 0 0;">
+      If you weren't expecting this, you can safely ignore this email.
     </p>
   </div>`;
 }

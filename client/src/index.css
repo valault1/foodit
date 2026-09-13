@@ -1052,6 +1052,12 @@ a {
   color: var(--accent);
 }
 
+.role-badge--super_admin {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
 .role-badge--member {
   background: var(--surface-2);
   color: var(--text-muted);
@@ -1070,6 +1076,11 @@ a {
   color: var(--text-muted);
   font-size: 0.85rem;
   margin: 12px 0 0;
+}
+
+/* Same look, but introduces the form above it rather than trailing it. */
+.invite-hint--lead {
+  margin: 0 0 14px;
 }
 
 .pending-invites {

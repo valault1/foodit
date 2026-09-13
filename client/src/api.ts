@@ -1,4 +1,5 @@
 import type {
+  AppInvite,
   AuthUser,
   Household,
   HouseholdInfo,
@@ -33,6 +34,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 /** The invite row, plus whether the notification email actually went out. */
 export interface CreateInviteResult {
   invite: Invite;
+  emailed: boolean;
+  warning?: string;
+}
+
+export interface CreateAppInviteResult {
+  appInvite: AppInvite;
   emailed: boolean;
   warning?: string;
 }
@@ -120,5 +127,22 @@ export const api = {
 
   deleteInvite(id: string): Promise<void> {
     return request<void>(`/household/invites/${id}`, { method: "DELETE" });
+  },
+
+  // --- App invites (super admin only) ---
+
+  listAppInvites(): Promise<AppInvite[]> {
+    return request<{ appInvites: AppInvite[] }>("/app-invites").then((r) => r.appInvites);
+  },
+
+  createAppInvite(email: string): Promise<CreateAppInviteResult> {
+    return request<CreateAppInviteResult>("/app-invites", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  deleteAppInvite(id: string): Promise<void> {
+    return request<void>(`/app-invites/${id}`, { method: "DELETE" });
   },
 };

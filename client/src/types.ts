@@ -37,7 +37,8 @@ export interface RecipeInput {
 
 // --- Auth ------------------------------------------------------------------
 
-export type Role = "admin" | "member";
+/** `super_admin` implies household admin, plus app-level invite powers. */
+export type Role = "super_admin" | "admin" | "member";
 
 export interface AuthUser {
   id: string;
@@ -58,6 +59,15 @@ export interface Invite {
   householdId: string;
   email: string;
   role: Role;
+  invitedBy: string | null;
+  createdAt: string;
+  acceptedAt: string | null;
+}
+
+/** An invite to the app itself (no household), issued by a super admin. */
+export interface AppInvite {
+  id: string;
+  email: string;
   invitedBy: string | null;
   createdAt: string;
   acceptedAt: string | null;

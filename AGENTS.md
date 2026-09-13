@@ -107,14 +107,15 @@ verify → issue a session. Implemented in `server/src/auth.ts`.
 - 90-day **sliding** expiry (ADR-006): every authenticated request pushes the
   expiry to now+90d, so active users stay logged in and inactive ones lapse.
 
-### ADR-005 — Self-serve household creation on first login
-**Decision:** On a verified login, an unknown email creates a **new household**
-with that user as its **admin**. An email with a pending invite joins the
-inviter's household (with the invited role). Existing users just sign in.
-**Why:** Someone has to be the first admin; self-serve bootstrapping avoids a
-manual seeding step and makes the app multi-tenant (each household is isolated).
-**Revisit when:** We want invite-only signup — then reject unknown emails that
-have no pending invite instead of creating a household.
+### ADR-005 — Household creation on first login
+**Decision:** On a verified login, an email with no account gets a **new
+household** with itself as **admin**. An email with a pending household invite
+joins the inviter's household (with the invited role). Existing users just sign
+in.
+**Why:** Someone has to be the first admin; this avoids a manual seeding step and
+makes the app multi-tenant (each household is isolated).
+**Superseded in part by ADR-010:** this is no longer *self-serve* — an unknown
+email must hold an app invite (or be a super admin) to get a household at all.
 
 ### ADR-006 — Sliding 90-day sessions (see ADR-004 for mechanics)
 **Decision:** Sessions expire 90 days after last use, refreshed on every
@@ -138,6 +139,36 @@ verified domain in Resend (set `FOODIT_FROM_EMAIL`).
 still valid undelivered — ADR-005 resolves the pending invite on first login —
 so `POST /api/household/invites` keeps the row and returns **201** with
 `{ emailed: false, warning }`, which the household page shows to the admin.
+
+### ADR-010 — Invite-only signup, with a super-admin role
+**Decision:** Signing up requires an invitation. `resolveUserOnLogin` admits an
+email only if it (a) already has an account, (b) holds a pending household invite
+(→ joins that household), (c) holds a pending **app invite** (→ gets its own new
+household as admin), or (d) is a **super admin**. Anything else is rejected with
+`SignupNotAllowedError`.
+**The `super_admin` role** is app-level and lives in `users.role` alongside
+`admin`/`member`. It *implies* household admin — compare with `isHouseholdAdmin()`
+from `db.ts`, never `role === "admin"` — and additionally grants
+`/api/app-invites` (invite someone to foodit itself; they get their own
+household, not yours).
+**Membership is env-driven, not database-driven.** `FOODIT_SUPER_ADMINS`
+(comma-separated, defaults to `valault1@gmail.com`) is the source of truth, and
+each login reconciles the stored role against it. This is what makes the gate
+bootstrappable: on an empty database nobody exists to issue the first invite, so
+without an allowlist that bypasses the check, a fresh deploy locks everyone out.
+Demotion targets `admin`, never `member`, so removing someone from the allowlist
+can only take away app-level power — never change their standing in a household.
+**Two tables, deliberately.** App invites are a separate `app_invites` table
+rather than `invites` rows with a null `household_id`: they mean a different
+thing (may sign up vs. join this household) and `invites` is keyed on
+`UNIQUE(household_id, email)`, which a null household would defeat.
+**The gate runs at `request-code`, not just `verify`,** so an uninvited address
+never receives a code or leaves a `login_codes` row.
+**Trade-off:** rejecting at `request-code` reveals whether an address is known to
+the app. Accepted deliberately — for a household recipe app, telling an invited
+user they typo'd their address beats resisting enumeration.
+**Revisit when:** super admins need to be managed in the UI, or the enumeration
+leak starts to matter.
 
 ### ADR-008 — Vercel Postgres (Neon) replaces local SQLite
 **Decision:** Persist to hosted **Postgres** (Vercel Postgres, backed by Neon)
