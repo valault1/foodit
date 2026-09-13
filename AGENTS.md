@@ -183,6 +183,13 @@ function and falls back all other paths to `index.html` (SPA routing).
   The Node major is pinned via `engines.node` in the root `package.json` instead.
   Server code therefore avoids Bun-only APIs and uses **extensionless imports**
   (`from "./db"`), which the Vercel/esbuild Node build requires (Bun tolerated `.ts`).
+- The root `package.json` must declare **`"type": "module"`** (both `client/` and
+  `server/` already do). Vercel/esbuild picks each transpiled function's module
+  format from the nearest `package.json`'s `type`. `api/index.ts` lives in the
+  **root** scope, so without this the entrypoint compiled to CommonJS and its
+  `require()` of the ESM `server/src/app.js` (server is `type: module`) failed at
+  runtime with `ERR_REQUIRE_ESM`. Declaring the root ESM makes the whole workspace
+  consistent so the function imports the app as ESM.
 - Same-origin in prod (client + API both on `foodit.valault.com`), so the
   `foodit_session` cookie needs no cross-site handling.
 - Vercel detects `bun.lock` and uses Bun for install/build (`bun run build`);
