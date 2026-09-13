@@ -25,6 +25,7 @@ import {
   getSessionUser,
   destroySession,
   sendLoginCodeEmail,
+  sendInviteEmail,
 } from "./auth.js";
 
 // Make the authenticated user available on the request.
@@ -216,7 +217,27 @@ app.post(
     }
 
     const invite = await createInvite(req.user!.householdId, email, role, req.user!.id);
-    res.status(201).json({ invite });
+
+    // The invite is already valid without the email — on first login the pending
+    // invite is what puts them in the household (ADR-005). So a delivery failure
+    // is reported as a warning rather than failing the request and stranding a
+    // row the admin can't see the outcome of.
+    let emailed = true;
+    let warning: string | undefined;
+    try {
+      const household = await getHousehold(req.user!.householdId);
+      await sendInviteEmail(email, {
+        householdName: household?.name ?? "your household",
+        invitedByEmail: req.user!.email,
+      });
+    } catch (e) {
+      console.error("[foodit] Invite email failed:", e);
+      emailed = false;
+      warning =
+        "The invite was created, but we couldn't email them. Ask them to sign in with this address.";
+    }
+
+    res.status(201).json({ invite, emailed, warning });
   })
 );
 

@@ -123,13 +123,21 @@ authenticated request, rather than a fixed 90-day-from-login window.
 refresh" requirement — regular users effectively never get logged out.
 
 ### ADR-007 — Resend for email, with a console fallback
-**Decision:** Send login codes via Resend's HTTP API (no SDK dependency — a plain
-`fetch`). If `RESEND_API_KEY` is unset, the server logs the code to the console.
+**Decision:** Send transactional email via Resend's HTTP API (no SDK dependency —
+a plain `fetch` in the shared `sendEmail` helper in `auth.ts`). If
+`RESEND_API_KEY` is unset, the server logs to the console instead of sending.
+Two emails exist: **login codes** (`sendLoginCodeEmail`) and **household
+invites** (`sendInviteEmail`, linking to `FOODIT_APP_URL`).
 **Why:** Zero-dependency, and the console fallback means local dev works with no
 key. Config lives in `server/.env` (git-ignored); see `server/.env.example`.
 **Note:** The shared `onboarding@resend.dev` sender is fine for testing but
 Resend restricts who it can email; sending to real household members needs a
 verified domain in Resend (set `FOODIT_FROM_EMAIL`).
+**Failure handling differs by email.** A login code is useless undelivered, so
+`POST /api/auth/request-code` returns **502** if the send fails. An invite is
+still valid undelivered — ADR-005 resolves the pending invite on first login —
+so `POST /api/household/invites` keeps the row and returns **201** with
+`{ emailed: false, warning }`, which the household page shows to the admin.
 
 ### ADR-008 — Vercel Postgres (Neon) replaces local SQLite
 **Decision:** Persist to hosted **Postgres** (Vercel Postgres, backed by Neon)
@@ -236,8 +244,9 @@ move the server to a long-running host (Railway/Render/Fly).
 
 ## Open questions (need a decision before the relevant slice)
 
-- ~~Email provider for login codes~~ → **Resolved: Resend** (ADR-007). Key goes in
-  `server/.env`. For emailing real household members, verify a domain in Resend.
+- ~~Email provider for login codes and invites~~ → **Resolved: Resend** (ADR-007).
+  Key goes in `server/.env`. For emailing real household members, verify a domain
+  in Resend.
 - ~~**Production hosting** for a long-running Express server~~ → **Resolved:
   Vercel** (ADR-009) — static client + Express exported as a single serverless
   function; database moved to Vercel Postgres (ADR-008). Remaining work is the

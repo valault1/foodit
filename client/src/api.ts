@@ -30,6 +30,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** The invite row, plus whether the notification email actually went out. */
+export interface CreateInviteResult {
+  invite: Invite;
+  emailed: boolean;
+  warning?: string;
+}
+
 export interface RecipeQuery {
   q?: string;
   tag?: string;
@@ -104,11 +111,11 @@ export const api = {
     return request("/household");
   },
 
-  createInvite(email: string, role: Role): Promise<Invite> {
-    return request<{ invite: Invite }>("/household/invites", {
+  createInvite(email: string, role: Role): Promise<CreateInviteResult> {
+    return request<CreateInviteResult>("/household/invites", {
       method: "POST",
       body: JSON.stringify({ email, role }),
-    }).then((r) => r.invite);
+    });
   },
 
   deleteInvite(id: string): Promise<void> {

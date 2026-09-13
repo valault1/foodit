@@ -16,6 +16,7 @@
   --accent-hover: #c64720;
   --accent-soft: #fbe9e1;
   --danger: #cf4444;
+  --success: #2f8257;
 
   --radius: 12px;
   --radius-lg: 16px;
@@ -43,6 +44,7 @@
     --accent-hover: #f68a66;
     --accent-soft: #3a2418;
     --danger: #e56a6a;
+    --success: #5cbd8b;
     --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.35);
     color-scheme: dark;
   }
@@ -790,6 +792,12 @@ a {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
   border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+.alert--success {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
 }
 
 .muted {

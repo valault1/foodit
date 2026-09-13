@@ -13,6 +13,7 @@ export function HouseholdPage() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteNotice, setInviteNotice] = useState<string | null>(null);
 
   const isAdmin = user?.role === "admin";
 
@@ -35,9 +36,14 @@ export function HouseholdPage() {
     e.preventDefault();
     setInviting(true);
     setInviteError(null);
+    setInviteNotice(null);
+    const email = inviteEmail.trim();
     try {
-      await api.createInvite(inviteEmail.trim(), "member");
+      const { emailed, warning } = await api.createInvite(email, "member");
       setInviteEmail("");
+      // The invite always lands; `emailed` says whether they were told about it.
+      if (emailed) setInviteNotice(`Invite sent to ${email}.`);
+      else setInviteError(warning ?? "The invite was created, but we couldn't email them.");
       await load();
     } catch (err) {
       setInviteError(err instanceof Error ? err.message : "Could not send invite");
@@ -96,8 +102,9 @@ export function HouseholdPage() {
             </button>
           </form>
           {inviteError && <div className="alert alert--error">{inviteError}</div>}
+          {inviteNotice && <div className="alert alert--success">{inviteNotice}</div>}
           <p className="invite-hint">
-            They'll be able to sign in with this email and join your household.
+            We'll email them a link. They sign in with this address to join your household.
           </p>
 
           {info && info.invites.length > 0 && (

@@ -206,13 +206,21 @@ export async function destroySession(token: string | undefined): Promise<void> {
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY?.trim();
 const FROM_EMAIL = process.env.FOODIT_FROM_EMAIL?.trim() || "foodit <onboarding@resend.dev>";
+const APP_URL = process.env.FOODIT_APP_URL?.trim() || "http://localhost:3000";
 
-export async function sendLoginCodeEmail(email: string, code: string): Promise<void> {
-  if (!RESEND_API_KEY) {
-    // Dev stub: no key configured, so print the code instead of emailing it.
-    console.log(`\n  [foodit] Login code for ${email}: ${code}\n`);
-    return;
-  }
+/**
+ * POST one email through Resend. Returns false when no key is configured, so
+ * callers can fall back to logging instead (see ADR-007); throws if Resend
+ * itself rejects the send.
+ */
+async function sendEmail(message: {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+  failureMessage: string;
+}): Promise<boolean> {
+  if (!RESEND_API_KEY) return false;
 
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -222,19 +230,76 @@ export async function sendLoginCodeEmail(email: string, code: string): Promise<v
     },
     body: JSON.stringify({
       from: FROM_EMAIL,
-      to: email,
-      subject: `Your foodit login code: ${code}`,
-      text: `Your foodit login code is ${code}. It expires in 10 minutes.`,
-      html: loginEmailHtml(code),
+      to: message.to,
+      subject: message.subject,
+      text: message.text,
+      html: message.html,
     }),
   });
 
   if (!res.ok) {
     const body = await res.text();
-    // Surface the failure to the caller; also log the code so dev isn't blocked.
     console.error(`[foodit] Resend error ${res.status}: ${body}`);
+    throw new Error(message.failureMessage);
+  }
+  return true;
+}
+
+export async function sendLoginCodeEmail(email: string, code: string): Promise<void> {
+  try {
+    const sent = await sendEmail({
+      to: email,
+      subject: `Your foodit login code: ${code}`,
+      text: `Your foodit login code is ${code}. It expires in 10 minutes.`,
+      html: loginEmailHtml(code),
+      failureMessage: "Could not send the login email. Please try again.",
+    });
+    // Dev stub: no key configured, so print the code instead of emailing it.
+    if (!sent) console.log(`\n  [foodit] Login code for ${email}: ${code}\n`);
+  } catch (err) {
+    // Log the code too, so a Resend outage doesn't block local development.
     console.log(`  [foodit] Login code for ${email}: ${code}`);
-    throw new Error("Could not send the login email. Please try again.");
+    throw err;
+  }
+}
+
+export interface InviteEmailOptions {
+  /** Household the invitee is being added to, for the email body. */
+  householdName: string;
+  /** Email of the admin who sent the invite. */
+  invitedByEmail: string;
+}
+
+/**
+ * Tell an invited email that they can now sign in and land in the household.
+ * There is no invite token — ADR-005 resolves the pending invite on first
+ * login — so this email carries no secret and is safe to re-send.
+ */
+export async function sendInviteEmail(
+  email: string,
+  { householdName, invitedByEmail }: InviteEmailOptions
+): Promise<void> {
+  // Link to the app root, not a /login path: signed-out visitors get the login
+  // screen at any route, and after signing in the root is where they belong
+  // (there is no /login route once authenticated — it would 404).
+  const signInUrl = APP_URL.replace(/\/$/, "") || APP_URL;
+  const sent = await sendEmail({
+    to: email,
+    subject: `${invitedByEmail} invited you to ${householdName} on foodit`,
+    text:
+      `${invitedByEmail} invited you to join "${householdName}" on foodit, ` +
+      `a shared recipe collection.\n\n` +
+      `Sign in with this email address (${email}) to join: ${signInUrl}\n\n` +
+      `You'll get a one-time code to finish signing in — no password needed.`,
+    html: inviteEmailHtml({ householdName, invitedByEmail, email, signInUrl }),
+    failureMessage: "Could not send the invite email.",
+  });
+
+  if (!sent) {
+    // Dev stub: mirrors the login-code fallback so local dev works with no key.
+    console.log(
+      `\n  [foodit] Invite for ${email} to "${householdName}" — sign in at ${signInUrl}\n`
+    );
   }
 }
 
@@ -249,4 +314,42 @@ function loginEmailHtml(code: string): string {
       If you didn't request this, you can safely ignore this email.
     </p>
   </div>`;
+}
+
+function inviteEmailHtml(opts: {
+  householdName: string;
+  invitedByEmail: string;
+  email: string;
+  signInUrl: string;
+}): string {
+  return `
+  <div style="font-family: system-ui, sans-serif; max-width: 420px; margin: 0 auto; padding: 24px;">
+    <h1 style="font-size: 20px; margin: 0 0 8px;">You're invited to ${escapeHtml(
+      opts.householdName
+    )}</h1>
+    <p style="color: #555; margin: 0 0 20px;">
+      ${escapeHtml(opts.invitedByEmail)} invited you to share a recipe collection on foodit.
+    </p>
+    <div style="text-align: center; margin: 0 0 20px;">
+      <a href="${escapeHtml(opts.signInUrl)}"
+         style="display: inline-block; background: #1f1d1a; color: #fff; text-decoration: none;
+                font-weight: 600; border-radius: 12px; padding: 14px 28px;">Join the household</a>
+    </div>
+    <p style="color: #555; margin: 0;">
+      Sign in with <strong>${escapeHtml(opts.email)}</strong> and we'll email you a
+      one-time code — no password needed.
+    </p>
+    <p style="color: #999; font-size: 12px; margin: 20px 0 0;">
+      If you weren't expecting this, you can safely ignore this email.
+    </p>
+  </div>`;
+}
+
+/** Invite emails interpolate user-controlled text (household name, emails). */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
