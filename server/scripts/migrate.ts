@@ -21,8 +21,8 @@ async function main() {
   await migrate(pool);
   await pool.end();
   console.log(
-    "✓ Schema is up to date (households, users, recipes, login_codes, sessions, " +
-      "invites, app_invites)."
+    "✓ Schema is up to date (households, users, household_members, recipes, " +
+      "login_codes, sessions, invites, app_invites)."
   );
 }
 

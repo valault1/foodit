@@ -1063,6 +1063,44 @@ a {
   color: var(--text-muted);
 }
 
+/* --- Household switcher ---------------------------------------------------- */
+
+.household-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.household-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+
+.household-row--active {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.household-create {
+  margin-top: 14px;
+}
+
+.household-create-link {
+  margin-top: 14px;
+}
+
+.btn-small {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
 .invite-form {
   display: flex;
   gap: 8px;

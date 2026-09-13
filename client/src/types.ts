@@ -37,15 +37,26 @@ export interface RecipeInput {
 
 // --- Auth ------------------------------------------------------------------
 
-/** `super_admin` implies household admin, plus app-level invite powers. */
-export type Role = "super_admin" | "admin" | "member";
+/** A role *within a household*. App-level power is `AuthUser.isSuperAdmin`. */
+export type Role = "admin" | "member";
 
 export interface AuthUser {
   id: string;
   email: string;
   name: string | null;
+  /** Role in the active household — changes when you switch (ADR-011). */
   role: Role;
+  /** The household currently being viewed, not a fixed home. */
   householdId: string;
+  isSuperAdmin: boolean;
+}
+
+/** One of the households you belong to, for the switcher. */
+export interface Membership {
+  householdId: string;
+  name: string;
+  role: Role;
+  joinedAt: string;
 }
 
 export interface Household {
@@ -77,4 +88,7 @@ export interface HouseholdInfo {
   household: Household | null;
   members: AuthUser[];
   invites: Invite[];
+  memberships: Membership[];
+  /** Invites to other households awaiting your decision. */
+  pendingForMe: (Invite & { householdName: string })[];
 }

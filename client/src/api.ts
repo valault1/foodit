@@ -4,6 +4,7 @@ import type {
   Household,
   HouseholdInfo,
   Invite,
+  Membership,
   Recipe,
   RecipeInput,
   Role,
@@ -127,6 +128,27 @@ export const api = {
 
   deleteInvite(id: string): Promise<void> {
     return request<void>(`/household/invites/${id}`, { method: "DELETE" });
+  },
+
+  // --- Households you belong to ---
+
+  activateHousehold(householdId: string): Promise<Household> {
+    return request<{ household: Household }>(`/households/${householdId}/activate`, {
+      method: "POST",
+    }).then((r) => r.household);
+  },
+
+  createHousehold(name: string): Promise<Membership> {
+    return request<{ membership: Membership }>("/households", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }).then((r) => r.membership);
+  },
+
+  acceptInvite(inviteId: string): Promise<Household> {
+    return request<{ household: Household }>(`/household/invites/${inviteId}/accept`, {
+      method: "POST",
+    }).then((r) => r.household);
   },
 
   // --- App invites (super admin only) ---

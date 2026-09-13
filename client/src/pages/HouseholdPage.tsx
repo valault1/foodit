@@ -5,13 +5,12 @@ import { useAuth } from "../auth";
 import type { AppInvite, HouseholdInfo, Role } from "../types";
 
 const ROLE_LABELS: Record<Role, string> = {
-  super_admin: "owner",
   admin: "admin",
   member: "member",
 };
 
 export function HouseholdPage() {
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const [info, setInfo] = useState<HouseholdInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -21,9 +20,10 @@ export function HouseholdPage() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteNotice, setInviteNotice] = useState<string | null>(null);
 
-  // super_admin implies household admin (see ADR-010).
-  const isAdmin = user?.role === "admin" || user?.role === "super_admin";
-  const isSuperAdmin = user?.role === "super_admin";
+  // Role is per-household and follows the active one (ADR-011); the super-admin
+  // flag is app-level and independent of it.
+  const isAdmin = user?.role === "admin";
+  const isSuperAdmin = user?.isSuperAdmin === true;
 
   async function load() {
     try {
@@ -34,6 +34,12 @@ export function HouseholdPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  /** After switching/creating/joining: the whole app's household context moved. */
+  async function reloadEverything() {
+    await refresh();
+    await load();
   }
 
   useEffect(() => {
@@ -74,6 +80,12 @@ export function HouseholdPage() {
       <p className="page-subtitle">Everyone here shares the same recipe collection.</p>
 
       {error && <div className="alert alert--error">{error}</div>}
+
+      <HouseholdSwitcher
+        info={info}
+        activeId={user?.householdId}
+        onChanged={reloadEverything}
+      />
 
       <section className="card household-section">
         <h2 className="section-title">Members</h2>
@@ -146,6 +158,147 @@ export function HouseholdPage() {
 
       {isSuperAdmin && <AppInviteSection />}
     </div>
+  );
+}
+
+/**
+ * The household you're looking at, the others you belong to, invitations
+ * waiting on you, and a way to start a new one (ADR-011).
+ */
+function HouseholdSwitcher({
+  info,
+  activeId,
+  onChanged,
+}: {
+  info: HouseholdInfo | null;
+  activeId: string | undefined;
+  onChanged: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const memberships = info?.memberships ?? [];
+  const pending = info?.pendingForMe ?? [];
+
+  async function run(key: string, action: () => Promise<unknown>) {
+    setBusy(key);
+    setError(null);
+    try {
+      await action();
+      await onChanged();
+      setNewName("");
+      setCreating(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Nothing to switch between and nothing pending — just offer to start one.
+  const showList = memberships.length > 1 || pending.length > 0;
+
+  return (
+    <section className="card household-section">
+      <h2 className="section-title">Your households</h2>
+
+      {showList && (
+        <ul className="household-list">
+          {memberships.map((m) => {
+            const active = m.householdId === activeId;
+            return (
+              <li
+                key={m.householdId}
+                className={`household-row${active ? " household-row--active" : ""}`}
+              >
+                <div className="member-info">
+                  <span className="member-email">{m.name}</span>
+                  {active && <span className="member-you">viewing</span>}
+                </div>
+                <span className={`role-badge role-badge--${m.role}`}>
+                  {ROLE_LABELS[m.role]}
+                </span>
+                {!active && (
+                  <button
+                    className="link-button"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      run(m.householdId, () => api.activateHousehold(m.householdId))
+                    }
+                  >
+                    {busy === m.householdId ? "Switching…" : "Switch"}
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {pending.length > 0 && (
+        <div className="pending-invites">
+          <h3 className="pending-title">Invitations for you</h3>
+          <ul className="household-list">
+            {pending.map((inv) => (
+              <li key={inv.id} className="household-row">
+                <div className="member-info">
+                  <span className="member-email">{inv.householdName}</span>
+                  <span className="member-you">invited as {ROLE_LABELS[inv.role]}</span>
+                </div>
+                <button
+                  className="btn btn-ghost btn-small"
+                  disabled={busy !== null}
+                  onClick={() => run(inv.id, () => api.acceptInvite(inv.id))}
+                >
+                  {busy === inv.id ? "Joining…" : "Join"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {error && <div className="alert alert--error">{error}</div>}
+
+      {creating ? (
+        <form
+          className="invite-form household-create"
+          onSubmit={(e) => {
+            e.preventDefault();
+            run("create", () => api.createHousehold(newName.trim()));
+          }}
+        >
+          <input
+            className="input"
+            placeholder="Household name"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            autoFocus
+            required
+          />
+          <button className="btn btn-primary" disabled={busy !== null || !newName.trim()}>
+            {busy === "create" ? "Creating…" : "Create"}
+          </button>
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => {
+              setCreating(false);
+              setNewName("");
+              setError(null);
+            }}
+          >
+            Cancel
+          </button>
+        </form>
+      ) : (
+        <button className="link-button household-create-link" onClick={() => setCreating(true)}>
+          + Create a new household
+        </button>
+      )}
+    </section>
   );
 }
 

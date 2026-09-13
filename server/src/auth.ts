@@ -9,7 +9,7 @@ import {
   createHouseholdWithAdmin,
   markInviteAccepted,
   getUserById,
-  setUserRole,
+  setUserSuperAdmin,
   type User,
 } from "./db.js";
 
@@ -174,52 +174,51 @@ export class SignupNotAllowedError extends Error {
 }
 
 /**
- * Existing user → itself (role re-synced against the allowlist). Household
- * invite → new member of that household. App invite or super admin → their own
- * new household. Anyone else is rejected: signup is invite-only (ADR-010).
+ * Existing user → itself (super-admin flag re-synced against the allowlist).
+ * Household invite → new member of that household. App invite or super admin →
+ * their own new household. Anyone else is rejected: signup is invite-only
+ * (ADR-010).
+ *
+ * Note an existing user's pending household invites are *not* applied here —
+ * they accept those explicitly from the household switcher (ADR-011). Signing
+ * in shouldn't silently drop you into someone else's household.
  */
 async function resolveUserOnLogin(email: string): Promise<User> {
   const superAdmin = isSuperAdminEmail(email);
 
   const existing = await getUserByEmail(email);
-  if (existing) return syncSuperAdminRole(existing, superAdmin);
+  if (existing) return syncSuperAdmin(existing, superAdmin);
 
   const invite = await getPendingInviteByEmail(email);
   if (invite) {
     const user = await createUser(invite.householdId, email, invite.role);
     await markInviteAccepted(invite.householdId, email);
-    return syncSuperAdminRole(user, superAdmin);
+    return syncSuperAdmin(user, superAdmin);
   }
 
   const appInvite = await getPendingAppInviteByEmail(email);
   if (appInvite) {
     // Invited to the app, not to a household — they get their own (ADR-010).
-    const user = await createHouseholdWithAdmin(email, undefined, "admin");
+    const user = await createHouseholdWithAdmin(email);
     await markAppInviteAccepted(email);
-    return syncSuperAdminRole(user, superAdmin);
+    return syncSuperAdmin(user, superAdmin);
   }
 
   // A super admin with no account yet bootstraps their own household.
-  if (superAdmin) return createHouseholdWithAdmin(email, undefined, "super_admin");
+  if (superAdmin) return createHouseholdWithAdmin(email, undefined, true);
 
   throw new SignupNotAllowedError();
 }
 
 /**
- * Reconcile a user's stored role with the allowlist. Demotion targets "admin",
- * never "member": super_admin already implied household admin, so this can only
- * remove app-level power, never grant more inside a household.
+ * Reconcile the stored super-admin flag with the allowlist. Now that this is a
+ * user-level flag rather than a household role (ADR-011), revoking it can't
+ * touch anyone's standing inside a household.
  */
-async function syncSuperAdminRole(user: User, shouldBeSuper: boolean): Promise<User> {
-  if (shouldBeSuper && user.role !== "super_admin") {
-    await setUserRole(user.id, "super_admin");
-    return { ...user, role: "super_admin" };
-  }
-  if (!shouldBeSuper && user.role === "super_admin") {
-    await setUserRole(user.id, "admin");
-    return { ...user, role: "admin" };
-  }
-  return user;
+async function syncSuperAdmin(user: User, shouldBeSuper: boolean): Promise<User> {
+  if (user.isSuperAdmin === shouldBeSuper) return user;
+  await setUserSuperAdmin(user.id, shouldBeSuper);
+  return { ...user, isSuperAdmin: shouldBeSuper };
 }
 
 // --- Sessions ----------------------------------------------------------------

@@ -146,11 +146,11 @@ email only if it (a) already has an account, (b) holds a pending household invit
 (→ joins that household), (c) holds a pending **app invite** (→ gets its own new
 household as admin), or (d) is a **super admin**. Anything else is rejected with
 `SignupNotAllowedError`.
-**The `super_admin` role** is app-level and lives in `users.role` alongside
-`admin`/`member`. It *implies* household admin — compare with `isHouseholdAdmin()`
-from `db.ts`, never `role === "admin"` — and additionally grants
-`/api/app-invites` (invite someone to foodit itself; they get their own
-household, not yours).
+**Super admin** is app-level and grants `/api/app-invites` (invite someone to
+foodit itself; they get their own household, not yours). *Superseded by ADR-011:*
+it began as a `users.role` value implying household admin, and is now a separate
+`users.is_super_admin` flag — once roles became per-household it could no longer
+live in that column.
 **Membership is env-driven, not database-driven.** `FOODIT_SUPER_ADMINS`
 (comma-separated, defaults to `valault1@gmail.com`) is the source of truth, and
 each login reconciles the stored role against it. This is what makes the gate
@@ -169,6 +169,34 @@ the app. Accepted deliberately — for a household recipe app, telling an invite
 user they typo'd their address beats resisting enumeration.
 **Revisit when:** super admins need to be managed in the UI, or the enumeration
 leak starts to matter.
+
+### ADR-011 — A user belongs to many households
+**Decision:** Membership moved off `users` (one `household_id`, one `role`) into
+a `household_members(household_id, user_id, role)` join table. A user picks an
+**active household** (`users.active_household_id`); everything else in the API —
+recipes, members, invites — is scoped to it.
+**`User.householdId` and `User.role` survived the change** and now mean "the
+household this request is about" and "your role *in that* household". Resolving
+them once in `getSessionUser` meant the recipe and invite handlers needed no
+edits, and it keeps household scoping impossible to forget at the call site.
+`db.ts` resolves the active household per request, falling back to the oldest
+membership when the pointer is unset or stale, so a bad pointer degrades to a
+sane view instead of a broken session.
+**`super_admin` left the role column** for `users.is_super_admin`. It was always
+app-level; with roles now scoped per household, keeping it there would have
+implied "admin of every household you're in". As a flag it can't leak into
+household permissions at all.
+**Invites and consent.** Inviting an email that already has an account is no
+longer a 409 — that's how you join a second household. Those land as a *pending*
+invite the recipient accepts from the switcher; signing in does not silently drop
+you into someone else's household. (A brand-new user's invite is still applied at
+signup, because there it *is* the account-creation path.)
+**Migration** (`migrateToMultiHousehold` in `schema.ts`) backfills memberships
+from the old columns, is re-runnable, and deliberately does **not** drop
+`users.household_id` / `users.role` — only their NOT NULL — so a rollback to the
+previous deploy still finds what it expects. Drop them once this has stuck.
+**Revisit when:** someone needs to leave a household, or a household needs to be
+renamed or deleted — none of which exist yet.
 
 ### ADR-008 — Vercel Postgres (Neon) replaces local SQLite
 **Decision:** Persist to hosted **Postgres** (Vercel Postgres, backed by Neon)

@@ -250,19 +250,15 @@ export async function listTags(householdId: string): Promise<string[]> {
 // Auth: households, users, invites (login codes + sessions live in auth.ts)
 // ============================================================================
 
-/**
- * `super_admin` is app-level (see ADR-010): it implies household `admin`
- * everywhere, and additionally allows inviting people to the app itself. Use
- * `isHouseholdAdmin` rather than comparing to "admin" directly.
- */
-export type Role = "super_admin" | "admin" | "member";
+/** A role *within a household*. App-level power is `User.isSuperAdmin`. */
+export type Role = "admin" | "member";
 
 export function isHouseholdAdmin(user: { role: Role }): boolean {
-  return user.role === "admin" || user.role === "super_admin";
+  return user.role === "admin";
 }
 
-export function isSuperAdmin(user: { role: Role }): boolean {
-  return user.role === "super_admin";
+export function isSuperAdmin(user: { isSuperAdmin: boolean }): boolean {
+  return user.isSuperAdmin;
 }
 
 export interface Household {
@@ -271,13 +267,29 @@ export interface Household {
   createdAt: string;
 }
 
+/**
+ * A signed-in user, resolved against their *active* household (ADR-011).
+ *
+ * `householdId` and `role` describe the household they are currently looking
+ * at, not a fixed home — switching households changes both. Route handlers can
+ * keep treating them as "the household this request is about".
+ */
 export interface User {
   id: string;
   householdId: string;
   email: string;
   name: string | null;
   role: Role;
+  isSuperAdmin: boolean;
   createdAt: string;
+}
+
+/** One of the households a user belongs to, for the switcher. */
+export interface Membership {
+  householdId: string;
+  name: string;
+  role: Role;
+  joinedAt: string;
 }
 
 export interface Invite {
@@ -296,44 +308,138 @@ function normalizeEmail(email: string): string {
 
 interface UserRow {
   id: string;
-  household_id: string;
   email: string;
   name: string | null;
-  role: string;
+  is_super_admin: boolean;
+  active_household_id: string | null;
   created_at: string;
 }
 
-function rowToUser(row: UserRow): User {
+/**
+ * Attach the active household to a bare user row.
+ *
+ * Falls back to the oldest membership when `active_household_id` is unset or
+ * points at a household they no longer belong to, so a stale pointer degrades
+ * to a sane view instead of a broken session.
+ */
+async function rowToUser(row: UserRow): Promise<User> {
+  const memberships = await listMemberships(row.id);
+  const active =
+    memberships.find((m) => m.householdId === row.active_household_id) ??
+    memberships[0] ??
+    // Unreachable in normal use — every user is created with a membership —
+    // but self-healing here beats 500ing every request the user makes.
+    (await createHouseholdFor(row.id));
+
   return {
     id: row.id,
-    householdId: row.household_id,
+    householdId: active.householdId,
     email: row.email,
     name: row.name,
-    role: (row.role as Role) ?? "member",
+    role: active.role,
+    isSuperAdmin: row.is_super_admin === true,
     createdAt: row.created_at,
   };
 }
 
+const USER_COLUMNS =
+  "id, email, name, is_super_admin, active_household_id, created_at";
+
 export async function getUserByEmail(email: string): Promise<User | null> {
-  const { rows } = await pool.query("SELECT * FROM users WHERE email = $1", [
-    normalizeEmail(email),
-  ]);
+  const { rows } = await pool.query(
+    `SELECT ${USER_COLUMNS} FROM users WHERE email = $1`,
+    [normalizeEmail(email)]
+  );
   const row = (rows as UserRow[])[0] ?? null;
   return row ? rowToUser(row) : null;
 }
 
 export async function getUserById(id: string): Promise<User | null> {
-  const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [id]);
+  const { rows } = await pool.query(
+    `SELECT ${USER_COLUMNS} FROM users WHERE id = $1`,
+    [id]
+  );
   const row = (rows as UserRow[])[0] ?? null;
   return row ? rowToUser(row) : null;
 }
 
+// --- Membership -------------------------------------------------------------
+
+interface MembershipRow {
+  household_id: string;
+  name: string;
+  role: string;
+  created_at: string;
+}
+
+export async function listMemberships(userId: string): Promise<Membership[]> {
+  const { rows } = await pool.query(
+    `SELECT hm.household_id, h.name, hm.role, hm.created_at
+     FROM household_members hm
+     JOIN households h ON h.id = hm.household_id
+     WHERE hm.user_id = $1
+     ORDER BY hm.created_at ASC`,
+    [userId]
+  );
+  return (rows as MembershipRow[]).map((r) => ({
+    householdId: r.household_id,
+    name: r.name,
+    role: (r.role as Role) ?? "member",
+    joinedAt: r.created_at,
+  }));
+}
+
+export async function isMember(householdId: string, userId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    "SELECT 1 FROM household_members WHERE household_id = $1 AND user_id = $2",
+    [householdId, userId]
+  );
+  return rows.length > 0;
+}
+
+/** Idempotent: re-adding an existing member refreshes their role. */
+export async function addMembership(
+  householdId: string,
+  userId: string,
+  role: Role
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO household_members (household_id, user_id, role, created_at)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (household_id, user_id) DO UPDATE SET role = excluded.role`,
+    [householdId, userId, role, new Date().toISOString()]
+  );
+}
+
+export async function setActiveHousehold(
+  userId: string,
+  householdId: string
+): Promise<void> {
+  await pool.query("UPDATE users SET active_household_id = $1 WHERE id = $2", [
+    householdId,
+    userId,
+  ]);
+}
+
 export async function listHouseholdMembers(householdId: string): Promise<User[]> {
   const { rows } = await pool.query(
-    "SELECT * FROM users WHERE household_id = $1 ORDER BY created_at ASC",
+    `SELECT ${USER_COLUMNS.split(", ").map((c) => "u." + c).join(", ")}, hm.role AS member_role
+     FROM household_members hm
+     JOIN users u ON u.id = hm.user_id
+     WHERE hm.household_id = $1
+     ORDER BY hm.created_at ASC`,
     [householdId]
   );
-  return (rows as UserRow[]).map(rowToUser);
+  // Report each member's role *in this household*, not in their active one.
+  return (rows as (UserRow & { member_role: string })[]).map((row) => ({
+    id: row.id,
+    householdId,
+    email: row.email,
+    name: row.name,
+    role: (row.member_role as Role) ?? "member",
+    isSuperAdmin: row.is_super_admin === true,
+    createdAt: row.created_at,
+  }));
 }
 
 export async function getHousehold(id: string): Promise<Household | null> {
@@ -342,18 +448,18 @@ export async function getHousehold(id: string): Promise<Household | null> {
   return row ? { id: row.id, name: row.name, createdAt: row.created_at } : null;
 }
 
+// --- Creating users and households ------------------------------------------
+
 /**
- * Create a brand-new household with its first user as its admin. `role` lets a
- * super admin bootstrap their own household without being demoted to "admin".
+ * Create a household owned by an existing user, and make it their active one.
+ * Used both at signup and by the "create a household" action (ADR-011).
  */
-export async function createHouseholdWithAdmin(
-  email: string,
-  name?: string,
-  role: Role = "admin"
-): Promise<User> {
+export async function createHouseholdFor(
+  userId: string,
+  name?: string
+): Promise<Membership> {
   const now = new Date().toISOString();
   const householdId = crypto.randomUUID();
-  const userId = crypto.randomUUID();
 
   const client = await pool.connect();
   try {
@@ -363,9 +469,14 @@ export async function createHouseholdWithAdmin(
       [householdId, name?.trim() || "My Household", now]
     );
     await client.query(
-      "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-      [userId, householdId, normalizeEmail(email), name?.trim() || null, role, now]
+      `INSERT INTO household_members (household_id, user_id, role, created_at)
+       VALUES ($1, $2, 'admin', $3)`,
+      [householdId, userId, now]
     );
+    await client.query("UPDATE users SET active_household_id = $1 WHERE id = $2", [
+      householdId,
+      userId,
+    ]);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -374,22 +485,57 @@ export async function createHouseholdWithAdmin(
     client.release();
   }
 
+  return {
+    householdId,
+    name: name?.trim() || "My Household",
+    role: "admin",
+    joinedAt: now,
+  };
+}
+
+/** Create a brand-new user owning a brand-new household. */
+export async function createHouseholdWithAdmin(
+  email: string,
+  name?: string,
+  isSuperAdmin = false
+): Promise<User> {
+  const userId = await insertUser(email, isSuperAdmin);
+  await createHouseholdFor(userId);
   return (await getUserById(userId))!;
 }
 
+/** Create a brand-new user as a member of an existing household. */
 export async function createUser(
   householdId: string,
   email: string,
   role: Role
 ): Promise<User> {
-  const now = new Date().toISOString();
-  const userId = crypto.randomUUID();
-  await pool.query(
-    "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES ($1, $2, $3, NULL, $4, $5)",
-    [userId, householdId, normalizeEmail(email), role, now]
-  );
+  const userId = await insertUser(email, false);
+  await addMembership(householdId, userId, role);
+  await setActiveHousehold(userId, householdId);
   return (await getUserById(userId))!;
 }
+
+async function insertUser(email: string, isSuperAdmin: boolean): Promise<string> {
+  const userId = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO users (id, email, name, is_super_admin, created_at)
+     VALUES ($1, $2, NULL, $3, $4)`,
+    [userId, normalizeEmail(email), isSuperAdmin, new Date().toISOString()]
+  );
+  return userId;
+}
+
+export async function setUserSuperAdmin(
+  userId: string,
+  isSuperAdmin: boolean
+): Promise<void> {
+  await pool.query("UPDATE users SET is_super_admin = $1 WHERE id = $2", [
+    isSuperAdmin,
+    userId,
+  ]);
+}
+
 
 // --- Invites ---------------------------------------------------------------
 
@@ -442,6 +588,30 @@ export async function createInvite(
     [id, householdId, normalizeEmail(email), role, invitedBy, now]
   );
   return (await getPendingInviteByEmail(email))!;
+}
+
+/** Pending invites addressed to an email, with the inviting household's name. */
+export async function listPendingInvitesForEmail(
+  email: string
+): Promise<(Invite & { householdName: string })[]> {
+  const { rows } = await pool.query(
+    `SELECT i.*, h.name AS household_name
+     FROM invites i
+     JOIN households h ON h.id = i.household_id
+     WHERE i.email = $1 AND i.accepted_at IS NULL
+     ORDER BY i.created_at ASC`,
+    [normalizeEmail(email)]
+  );
+  return (rows as (InviteRow & { household_name: string })[]).map((row) => ({
+    ...rowToInvite(row),
+    householdName: row.household_name,
+  }));
+}
+
+export async function getInviteById(id: string): Promise<Invite | null> {
+  const { rows } = await pool.query("SELECT * FROM invites WHERE id = $1", [id]);
+  const row = (rows as InviteRow[])[0] ?? null;
+  return row ? rowToInvite(row) : null;
 }
 
 export async function listPendingInvites(householdId: string): Promise<Invite[]> {

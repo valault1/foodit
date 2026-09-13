@@ -16,6 +16,14 @@ import {
   getUserByEmail,
   isHouseholdAdmin,
   isSuperAdmin,
+  listMemberships,
+  isMember,
+  addMembership,
+  setActiveHousehold,
+  createHouseholdFor,
+  listPendingInvitesForEmail,
+  getInviteById,
+  markInviteAccepted,
   listPendingAppInvites,
   createAppInvite,
   deleteAppInvite,
@@ -197,6 +205,7 @@ function publicUser(user: User) {
     name: user.name,
     role: user.role,
     householdId: user.householdId,
+    isSuperAdmin: user.isSuperAdmin,
   };
 }
 
@@ -213,6 +222,11 @@ app.get(
       household: await getHousehold(hid),
       members: (await listHouseholdMembers(hid)).map(publicUser),
       invites: isHouseholdAdmin(req.user!) ? await listPendingInvites(hid) : [],
+      memberships: await listMemberships(req.user!.id),
+      // Invites to *other* households awaiting this user's decision (ADR-011).
+      pendingForMe: (await listPendingInvitesForEmail(req.user!.email)).filter(
+        (i) => i.householdId !== hid
+      ),
     });
   })
 );
@@ -230,16 +244,13 @@ app.post(
     }
     const role = req.body?.role === "admin" ? "admin" : "member";
 
+    // An existing account may join a second household (ADR-011) — only an
+    // existing *membership* is a conflict.
     const existing = await getUserByEmail(email);
-    if (existing) {
-      if (existing.householdId === req.user!.householdId) {
-        return res
-          .status(409)
-          .json({ error: "That person is already in your household." });
-      }
+    if (existing && (await isMember(req.user!.householdId, existing.id))) {
       return res
         .status(409)
-        .json({ error: "That email already belongs to another household." });
+        .json({ error: "That person is already in your household." });
     }
 
     const invite = await createInvite(req.user!.householdId, email, role, req.user!.id);
@@ -277,6 +288,68 @@ app.delete(
     const ok = await deleteInvite(req.user!.householdId, req.params.id);
     if (!ok) return res.status(404).json({ error: "Invite not found" });
     res.status(204).end();
+  })
+);
+
+// ============================================================================
+// Households a user belongs to: switch, create, accept an invite. See ADR-011.
+// ============================================================================
+
+app.get(
+  "/api/households",
+  requireAuth,
+  wrap(async (req, res) => {
+    res.json({
+      memberships: await listMemberships(req.user!.id),
+      activeHouseholdId: req.user!.householdId,
+    });
+  })
+);
+
+// Switch which household the rest of the API reads and writes.
+app.post(
+  "/api/households/:id/activate",
+  requireAuth,
+  wrap(async (req, res) => {
+    if (!(await isMember(req.params.id, req.user!.id))) {
+      return res.status(403).json({ error: "You're not a member of that household." });
+    }
+    await setActiveHousehold(req.user!.id, req.params.id);
+    res.json({ household: await getHousehold(req.params.id) });
+  })
+);
+
+// Start a brand-new household; the creator is its admin and it becomes active.
+app.post(
+  "/api/households",
+  requireAuth,
+  wrap(async (req, res) => {
+    const name = String(req.body?.name ?? "").trim();
+    if (!name) return res.status(400).json({ error: "A household name is required." });
+    const membership = await createHouseholdFor(req.user!.id, name);
+    res.status(201).json({ membership });
+  })
+);
+
+// Accept an invite addressed to you — this is how an existing account picks up
+// an additional household.
+app.post(
+  "/api/household/invites/:id/accept",
+  requireAuth,
+  wrap(async (req, res) => {
+    const invite = await getInviteById(req.params.id);
+    if (!invite || invite.acceptedAt) {
+      return res.status(404).json({ error: "That invite is no longer available." });
+    }
+    // Addressed to someone else — don't confirm it exists.
+    if (invite.email !== req.user!.email.toLowerCase()) {
+      return res.status(404).json({ error: "That invite is no longer available." });
+    }
+
+    await addMembership(invite.householdId, req.user!.id, invite.role);
+    await markInviteAccepted(invite.householdId, invite.email);
+    await setActiveHousehold(req.user!.id, invite.householdId);
+    res.json({ household: await getHousehold(invite.householdId) });
   })
 );
 
