@@ -217,9 +217,14 @@ fresh household when that was the user's last one — so deleting someone's only
 household leaves them with a working session and an empty household rather than
 a broken login. No special-casing needed here.
 **Deletion is destructive and unconfirmed server-side.** The recipes are gone,
-with no soft-delete or undo. The client asks for confirmation and shows the
-recipe count (from `recipeCount` on `/api/household`, which covers the active
-household only). If this ever gets used in anger, a soft delete is the fix.
+with no soft-delete or undo. The guard is entirely in the client: a "Danger
+zone" at the foot of the household page that targets **the household you're
+currently viewing**, lists what will be lost (recipe count from `recipeCount` on
+`/api/household`, plus how many other members lose access), and requires the
+household's name to be typed exactly before the button arms. The endpoint itself
+still accepts any household you administer, so anything scripting it should
+treat it as immediately destructive. If this ever gets used in anger, a soft
+delete is the fix.
 **Revisit when:** deleting needs to be undoable, or a household with other
 members in it should require their consent rather than one admin's click.
 

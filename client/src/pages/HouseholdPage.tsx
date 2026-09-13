@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import type { AppInvite, HouseholdInfo, Role } from "../types";
+import type { AppInvite, Household, HouseholdInfo, Role } from "../types";
 
 const ROLE_LABELS: Record<Role, string> = {
   admin: "admin",
@@ -157,7 +157,125 @@ export function HouseholdPage() {
       )}
 
       {isSuperAdmin && <AppInviteSection />}
+
+      {isAdmin && info?.household && (
+        <DangerZone
+          household={info.household}
+          recipeCount={info.recipeCount}
+          memberCount={info.members.length}
+          onDeleted={reloadEverything}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Deleting the household you're currently viewing. Deliberately awkward: it
+ * takes the recipes and every other member's access with it, and there's no
+ * undo (ADR-012), so the name has to be typed exactly to arm the button.
+ */
+function DangerZone({
+  household,
+  recipeCount,
+  memberCount,
+  onDeleted,
+}: {
+  household: Household;
+  recipeCount: number;
+  memberCount: number;
+  onDeleted: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const armed = typed.trim() === household.name.trim();
+  const others = memberCount - 1;
+
+  async function destroy() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteHousehold(household.id);
+      await onDeleted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not delete the household");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card danger-zone">
+      <h2 className="section-title danger-zone-title">Danger zone</h2>
+
+      {!open ? (
+        <div className="danger-zone-row">
+          <div>
+            <p className="danger-zone-lead">Delete this household</p>
+            <p className="invite-hint danger-zone-hint">
+              Permanently deletes <strong>{household.name}</strong> and everything in it.
+            </p>
+          </div>
+          <button className="btn btn-danger" onClick={() => setOpen(true)}>
+            Delete household
+          </button>
+        </div>
+      ) : (
+        <>
+          <p className="danger-zone-lead">
+            Delete <strong>{household.name}</strong>?
+          </p>
+          <ul className="danger-list">
+            <li>
+              {recipeCount} recipe{recipeCount === 1 ? "" : "s"} will be permanently
+              deleted.
+            </li>
+            {others > 0 && (
+              <li>
+                {others} other member{others === 1 ? "" : "s"} will lose access.
+              </li>
+            )}
+            <li>This cannot be undone.</li>
+          </ul>
+
+          <label className="danger-confirm-label" htmlFor="confirm-household-name">
+            Type <strong>{household.name}</strong> to confirm:
+          </label>
+          <div className="invite-form">
+            <input
+              id="confirm-household-name"
+              className="input"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder={household.name}
+              autoComplete="off"
+              autoFocus
+            />
+            <button
+              className="btn btn-danger"
+              disabled={!armed || busy}
+              onClick={destroy}
+            >
+              {busy ? "Deleting…" : "Delete forever"}
+            </button>
+            <button
+              className="link-button"
+              disabled={busy}
+              onClick={() => {
+                setOpen(false);
+                setTyped("");
+                setError(null);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {error && <div className="alert alert--error">{error}</div>}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -180,7 +298,6 @@ function HouseholdSwitcher({
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const memberships = info?.memberships ?? [];
   const pending = info?.pendingForMe ?? [];
@@ -194,7 +311,6 @@ function HouseholdSwitcher({
       setNewName("");
       setCreating(false);
       setRenaming(null);
-      setConfirmDelete(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {
@@ -252,39 +368,6 @@ function HouseholdSwitcher({
               );
             }
 
-            if (confirmDelete === m.householdId) {
-              // Only the active household's recipe count is known here.
-              const count = active ? info?.recipeCount ?? 0 : null;
-              return (
-                <li key={m.householdId} className="household-row household-row--danger">
-                  <div className="member-info">
-                    <span className="member-email">Delete “{m.name}”?</span>
-                    <span className="household-danger-note">
-                      {count !== null
-                        ? `${count} recipe${count === 1 ? "" : "s"} will be permanently deleted.`
-                        : "Its recipes will be permanently deleted."}{" "}
-                      This can't be undone.
-                    </span>
-                  </div>
-                  <button
-                    className="btn btn-danger btn-small"
-                    disabled={busy !== null}
-                    onClick={() =>
-                      run(m.householdId, () => api.deleteHousehold(m.householdId))
-                    }
-                  >
-                    {busy === m.householdId ? "Deleting…" : "Delete"}
-                  </button>
-                  <button
-                    className="link-button"
-                    onClick={() => setConfirmDelete(null)}
-                  >
-                    Cancel
-                  </button>
-                </li>
-              );
-            }
-
             return (
               <li
                 key={m.householdId}
@@ -315,21 +398,10 @@ function HouseholdSwitcher({
                       disabled={busy !== null}
                       onClick={() => {
                         setRenameValue(m.name);
-                        setConfirmDelete(null);
                         setRenaming(m.householdId);
                       }}
                     >
                       Rename
-                    </button>
-                    <button
-                      className="link-button link-button--danger"
-                      disabled={busy !== null}
-                      onClick={() => {
-                        setRenaming(null);
-                        setConfirmDelete(m.householdId);
-                      }}
-                    >
-                      Delete
                     </button>
                   </>
                 )}
