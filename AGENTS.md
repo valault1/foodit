@@ -181,8 +181,18 @@ function and falls back all other paths to `index.html` (SPA routing).
   `nodejs20.x` (that field wants an npm runtime package like `@vercel/node@x` and
   errors on the version string: "Function Runtimes must have a valid version").
   The Node major is pinned via `engines.node` in the root `package.json` instead.
-  Server code therefore avoids Bun-only APIs and uses **extensionless imports**
-  (`from "./db"`), which the Vercel/esbuild Node build requires (Bun tolerated `.ts`).
+  Server code therefore avoids Bun-only APIs.
+- Relative imports in the function's module graph (`api/index.ts` and everything
+  under `server/src`) must carry an explicit **`.js` extension**
+  (`from "./db.js"`). Vercel does **not** bundle this function — it transpiles each
+  `.ts` to `.js` and lets **native Node ESM** resolve them at runtime, and Node's
+  ESM resolver never probes for extensions. An extensionless specifier throws
+  `ERR_MODULE_NOT_FOUND` in production (it happened to work under CommonJS, which
+  is why the pre-ESM guidance said "extensionless"). The `.js` names the compiled
+  output even though the source is `.ts` — the standard TypeScript-ESM convention.
+  Bun (local dev) and `tsc` (`moduleResolution: "bundler"`) both resolve the `.js`
+  specifier back to the `.ts` source, so one spelling works everywhere. Never use
+  explicit `.ts` specifiers — the Node build rejects them.
 - The root `package.json` must declare **`"type": "module"`** (both `client/` and
   `server/` already do). Vercel/esbuild picks each transpiled function's module
   format from the nearest `package.json`'s `type`. `api/index.ts` lives in the
