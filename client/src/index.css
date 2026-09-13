@@ -1088,6 +1088,30 @@ a {
   border-color: var(--border);
 }
 
+.household-row--danger {
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+  flex-wrap: wrap;
+}
+
+.household-danger-note {
+  font-size: 0.8rem;
+  color: var(--danger);
+}
+
+.household-rename {
+  width: 100%;
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 85%, #000);
+}
+
 .household-create {
   margin-top: 14px;
 }

@@ -178,6 +178,9 @@ function HouseholdSwitcher({
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const memberships = info?.memberships ?? [];
   const pending = info?.pendingForMe ?? [];
@@ -190,6 +193,8 @@ function HouseholdSwitcher({
       await onChanged();
       setNewName("");
       setCreating(false);
+      setRenaming(null);
+      setConfirmDelete(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {
@@ -197,17 +202,89 @@ function HouseholdSwitcher({
     }
   }
 
-  // Nothing to switch between and nothing pending — just offer to start one.
-  const showList = memberships.length > 1 || pending.length > 0;
+  // Always rendered — even with a single household it carries rename/delete.
 
   return (
     <section className="card household-section">
       <h2 className="section-title">Your households</h2>
 
-      {showList && (
+      {memberships.length > 0 && (
         <ul className="household-list">
           {memberships.map((m) => {
             const active = m.householdId === activeId;
+            const canManage = m.role === "admin";
+
+            if (renaming === m.householdId) {
+              return (
+                <li key={m.householdId} className="household-row">
+                  <form
+                    className="invite-form household-rename"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      run(m.householdId, () =>
+                        api.renameHousehold(m.householdId, renameValue.trim())
+                      );
+                    }}
+                  >
+                    <input
+                      className="input"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      aria-label={`New name for ${m.name}`}
+                      autoFocus
+                      required
+                    />
+                    <button
+                      className="btn btn-primary btn-small"
+                      disabled={busy !== null || !renameValue.trim()}
+                    >
+                      {busy === m.householdId ? "Saving…" : "Save"}
+                    </button>
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setRenaming(null)}
+                    >
+                      Cancel
+                    </button>
+                  </form>
+                </li>
+              );
+            }
+
+            if (confirmDelete === m.householdId) {
+              // Only the active household's recipe count is known here.
+              const count = active ? info?.recipeCount ?? 0 : null;
+              return (
+                <li key={m.householdId} className="household-row household-row--danger">
+                  <div className="member-info">
+                    <span className="member-email">Delete “{m.name}”?</span>
+                    <span className="household-danger-note">
+                      {count !== null
+                        ? `${count} recipe${count === 1 ? "" : "s"} will be permanently deleted.`
+                        : "Its recipes will be permanently deleted."}{" "}
+                      This can't be undone.
+                    </span>
+                  </div>
+                  <button
+                    className="btn btn-danger btn-small"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      run(m.householdId, () => api.deleteHousehold(m.householdId))
+                    }
+                  >
+                    {busy === m.householdId ? "Deleting…" : "Delete"}
+                  </button>
+                  <button
+                    className="link-button"
+                    onClick={() => setConfirmDelete(null)}
+                  >
+                    Cancel
+                  </button>
+                </li>
+              );
+            }
+
             return (
               <li
                 key={m.householdId}
@@ -230,6 +307,31 @@ function HouseholdSwitcher({
                   >
                     {busy === m.householdId ? "Switching…" : "Switch"}
                   </button>
+                )}
+                {canManage && (
+                  <>
+                    <button
+                      className="link-button"
+                      disabled={busy !== null}
+                      onClick={() => {
+                        setRenameValue(m.name);
+                        setConfirmDelete(null);
+                        setRenaming(m.householdId);
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      className="link-button link-button--danger"
+                      disabled={busy !== null}
+                      onClick={() => {
+                        setRenaming(null);
+                        setConfirmDelete(m.householdId);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </>
                 )}
               </li>
             );

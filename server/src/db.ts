@@ -448,6 +448,64 @@ export async function getHousehold(id: string): Promise<Household | null> {
   return row ? { id: row.id, name: row.name, createdAt: row.created_at } : null;
 }
 
+/** This user's role in a specific household, or null if they're not in it. */
+export async function getMembership(
+  householdId: string,
+  userId: string
+): Promise<Membership | null> {
+  const all = await listMemberships(userId);
+  return all.find((m) => m.householdId === householdId) ?? null;
+}
+
+export async function renameHousehold(id: string, name: string): Promise<Household | null> {
+  await pool.query("UPDATE households SET name = $1 WHERE id = $2", [name.trim(), id]);
+  return getHousehold(id);
+}
+
+/**
+ * Delete a household and everything scoped to it (ADR-012). Destructive: its
+ * recipes are gone.
+ *
+ * Five columns reference `households(id)`, and every one has to be cleared in
+ * the same transaction or the final DELETE trips a foreign-key violation —
+ * including the *legacy* `users.household_id`, which nothing reads any more but
+ * which still carries its constraint.
+ *
+ * Members whose active household this was are left pointing at NULL; the
+ * session layer then falls back to their oldest remaining membership, or
+ * self-heals into a fresh household if this was their last one.
+ */
+export async function deleteHousehold(id: string): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "UPDATE users SET active_household_id = NULL WHERE active_household_id = $1",
+      [id]
+    );
+    await client.query("UPDATE users SET household_id = NULL WHERE household_id = $1", [id]);
+    await client.query("DELETE FROM recipes WHERE household_id = $1", [id]);
+    await client.query("DELETE FROM invites WHERE household_id = $1", [id]);
+    await client.query("DELETE FROM household_members WHERE household_id = $1", [id]);
+    await client.query("DELETE FROM households WHERE id = $1", [id]);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** How many recipes would be lost if this household were deleted. */
+export async function countRecipes(householdId: string): Promise<number> {
+  const { rows } = await pool.query(
+    "SELECT count(*)::int AS n FROM recipes WHERE household_id = $1",
+    [householdId]
+  );
+  return (rows as { n: number }[])[0]?.n ?? 0;
+}
+
 // --- Creating users and households ------------------------------------------
 
 /**

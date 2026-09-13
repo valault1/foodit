@@ -145,6 +145,20 @@ export const api = {
     }).then((r) => r.membership);
   },
 
+  renameHousehold(householdId: string, name: string): Promise<Household> {
+    return request<{ household: Household }>(`/households/${householdId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }).then((r) => r.household);
+  },
+
+  /** Resolves to the household the user landed on afterwards (may be new). */
+  deleteHousehold(householdId: string): Promise<string | null> {
+    return request<{ activeHouseholdId: string | null }>(`/households/${householdId}`, {
+      method: "DELETE",
+    }).then((r) => r.activeHouseholdId);
+  },
+
   acceptInvite(inviteId: string): Promise<Household> {
     return request<{ household: Household }>(`/household/invites/${inviteId}/accept`, {
       method: "POST",

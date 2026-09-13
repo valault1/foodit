@@ -14,6 +14,7 @@ import {
   createInvite,
   deleteInvite,
   getUserByEmail,
+  getUserById,
   isHouseholdAdmin,
   isSuperAdmin,
   listMemberships,
@@ -24,6 +25,10 @@ import {
   listPendingInvitesForEmail,
   getInviteById,
   markInviteAccepted,
+  getMembership,
+  renameHousehold,
+  deleteHousehold,
+  countRecipes,
   listPendingAppInvites,
   createAppInvite,
   deleteAppInvite,
@@ -223,6 +228,7 @@ app.get(
       members: (await listHouseholdMembers(hid)).map(publicUser),
       invites: isHouseholdAdmin(req.user!) ? await listPendingInvites(hid) : [],
       memberships: await listMemberships(req.user!.id),
+      recipeCount: await countRecipes(hid),
       // Invites to *other* households awaiting this user's decision (ADR-011).
       pendingForMe: (await listPendingInvitesForEmail(req.user!.email)).filter(
         (i) => i.householdId !== hid
@@ -328,6 +334,51 @@ app.post(
     if (!name) return res.status(400).json({ error: "A household name is required." });
     const membership = await createHouseholdFor(req.user!.id, name);
     res.status(201).json({ membership });
+  })
+);
+
+/**
+ * Admin of *this* household — not of whichever one happens to be active. These
+ * routes take an id, so authorization has to follow that id.
+ */
+async function adminOf(householdId: string, userId: string): Promise<boolean> {
+  const membership = await getMembership(householdId, userId);
+  return membership?.role === "admin";
+}
+
+app.patch(
+  "/api/households/:id",
+  requireAuth,
+  wrap(async (req, res) => {
+    if (!(await adminOf(req.params.id, req.user!.id))) {
+      return res
+        .status(403)
+        .json({ error: "Only an admin of that household can rename it." });
+    }
+    const name = String(req.body?.name ?? "").trim();
+    if (!name) return res.status(400).json({ error: "A household name is required." });
+
+    const household = await renameHousehold(req.params.id, name);
+    if (!household) return res.status(404).json({ error: "Household not found" });
+    res.json({ household });
+  })
+);
+
+app.delete(
+  "/api/households/:id",
+  requireAuth,
+  wrap(async (req, res) => {
+    if (!(await adminOf(req.params.id, req.user!.id))) {
+      return res
+        .status(403)
+        .json({ error: "Only an admin of that household can delete it." });
+    }
+
+    await deleteHousehold(req.params.id);
+    // Their active household may have just been deleted; the session layer
+    // resolves the fallback, so report where they actually landed.
+    const after = await getUserById(req.user!.id);
+    res.json({ activeHouseholdId: after?.householdId ?? null });
   })
 );
 

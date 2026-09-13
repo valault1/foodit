@@ -89,6 +89,8 @@ export interface HouseholdInfo {
   members: AuthUser[];
   invites: Invite[];
   memberships: Membership[];
+  /** Recipes in the active household — shown before a destructive delete. */
+  recipeCount: number;
   /** Invites to other households awaiting your decision. */
   pendingForMe: (Invite & { householdName: string })[];
 }

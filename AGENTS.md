@@ -195,8 +195,33 @@ signup, because there it *is* the account-creation path.)
 from the old columns, is re-runnable, and deliberately does **not** drop
 `users.household_id` / `users.role` — only their NOT NULL — so a rollback to the
 previous deploy still finds what it expects. Drop them once this has stuck.
-**Revisit when:** someone needs to leave a household, or a household needs to be
-renamed or deleted — none of which exist yet.
+**Revisit when:** someone needs to leave a household, or a member needs removing
+— neither exists yet. (Renaming and deleting arrived in ADR-012.)
+
+### ADR-012 — Renaming and deleting households
+**Decision:** An **admin of that household** can rename it (`PATCH
+/api/households/:id`) or delete it outright (`DELETE /api/households/:id`).
+**Authorization follows the id in the path, not the active household.** These
+routes name a household, so `isHouseholdAdmin(req.user)` — which reports your
+role in whatever you're *currently viewing* — is the wrong check and would let
+an admin of household A act on household B. `adminOf(householdId, userId)` in
+`app.ts` resolves the membership for the targeted household instead.
+**Deleting clears five foreign keys in one transaction.** `recipes`, `invites`,
+`household_members`, `users.active_household_id` and — easy to miss —
+**`users.household_id`**, the legacy pre-ADR-011 column that nothing reads any
+more but that still carries its constraint. Missing any one of them makes the
+final `DELETE` fail on a foreign-key violation.
+**Members are left pointing at NULL, deliberately.** The session layer already
+falls back to the oldest remaining membership (ADR-011), and self-heals into a
+fresh household when that was the user's last one — so deleting someone's only
+household leaves them with a working session and an empty household rather than
+a broken login. No special-casing needed here.
+**Deletion is destructive and unconfirmed server-side.** The recipes are gone,
+with no soft-delete or undo. The client asks for confirmation and shows the
+recipe count (from `recipeCount` on `/api/household`, which covers the active
+household only). If this ever gets used in anger, a soft delete is the fix.
+**Revisit when:** deleting needs to be undoable, or a household with other
+members in it should require their consent rather than one admin's click.
 
 ### ADR-008 — Vercel Postgres (Neon) replaces local SQLite
 **Decision:** Persist to hosted **Postgres** (Vercel Postgres, backed by Neon)
