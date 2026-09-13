@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
-  db,
+  pool,
   getUserByEmail,
   getPendingInviteByEmail,
   createUser,
@@ -8,7 +8,7 @@ import {
   markInviteAccepted,
   getUserById,
   type User,
-} from "./db.ts";
+} from "./db";
 
 // --- Tunables ----------------------------------------------------------------
 
@@ -45,23 +45,24 @@ function normalizeEmail(email: string): string {
  * Create a fresh login code for an email, invalidating any earlier ones.
  * Returns the plaintext code so the caller can deliver it.
  */
-export function createLoginCode(email: string): string {
+export async function createLoginCode(email: string): Promise<string> {
   const normalized = normalizeEmail(email);
   const now = Date.now();
 
   // Burn any outstanding codes for this email.
-  db.query("DELETE FROM login_codes WHERE email = ?").run(normalized);
+  await pool.query("DELETE FROM login_codes WHERE email = $1", [normalized]);
 
   const code = generateCode();
-  db.query(
+  await pool.query(
     `INSERT INTO login_codes (id, email, code_hash, expires_at, attempts, created_at)
-     VALUES (?, ?, ?, ?, 0, ?)`
-  ).run(
-    crypto.randomUUID(),
-    normalized,
-    sha256(code),
-    new Date(now + CODE_TTL_MS).toISOString(),
-    new Date(now).toISOString()
+     VALUES ($1, $2, $3, $4, 0, $5)`,
+    [
+      crypto.randomUUID(),
+      normalized,
+      sha256(code),
+      new Date(now + CODE_TTL_MS).toISOString(),
+      new Date(now).toISOString(),
+    ]
   );
 
   return code;
@@ -84,49 +85,57 @@ export type VerifyResult =
  * Verify a submitted code. On success, resolves the user — creating one if this
  * is a self-serve first login or an invited email accepting their invite.
  */
-export function verifyLoginCode(email: string, submitted: string): VerifyResult {
+export async function verifyLoginCode(
+  email: string,
+  submitted: string
+): Promise<VerifyResult> {
   const normalized = normalizeEmail(email);
-  const row = db
-    .query("SELECT * FROM login_codes WHERE email = ? AND consumed_at IS NULL")
-    .get(normalized) as CodeRow | null;
+  const { rows } = await pool.query(
+    "SELECT * FROM login_codes WHERE email = $1 AND consumed_at IS NULL",
+    [normalized]
+  );
+  const row = (rows as CodeRow[])[0] ?? null;
 
   if (!row) return { ok: false, reason: "no_code" };
 
   if (new Date(row.expires_at).getTime() < Date.now()) {
-    db.query("DELETE FROM login_codes WHERE id = ?").run(row.id);
+    await pool.query("DELETE FROM login_codes WHERE id = $1", [row.id]);
     return { ok: false, reason: "expired" };
   }
 
   if (row.attempts >= MAX_CODE_ATTEMPTS) {
-    db.query("DELETE FROM login_codes WHERE id = ?").run(row.id);
+    await pool.query("DELETE FROM login_codes WHERE id = $1", [row.id]);
     return { ok: false, reason: "too_many_attempts" };
   }
 
   const matches = constantTimeEqual(row.code_hash, sha256(submitted.trim()));
   if (!matches) {
-    db.query("UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?").run(row.id);
+    await pool.query(
+      "UPDATE login_codes SET attempts = attempts + 1 WHERE id = $1",
+      [row.id]
+    );
     return { ok: false, reason: "wrong_code" };
   }
 
   // Success — consume the code and resolve the user.
-  db.query("UPDATE login_codes SET consumed_at = ? WHERE id = ?").run(
+  await pool.query("UPDATE login_codes SET consumed_at = $1 WHERE id = $2", [
     new Date().toISOString(),
-    row.id
-  );
+    row.id,
+  ]);
 
-  const user = resolveUserOnLogin(normalized);
+  const user = await resolveUserOnLogin(normalized);
   return { ok: true, user };
 }
 
 /** Existing user → itself. Invited email → new member. Otherwise → new household admin. */
-function resolveUserOnLogin(email: string): User {
-  const existing = getUserByEmail(email);
+async function resolveUserOnLogin(email: string): Promise<User> {
+  const existing = await getUserByEmail(email);
   if (existing) return existing;
 
-  const invite = getPendingInviteByEmail(email);
+  const invite = await getPendingInviteByEmail(email);
   if (invite) {
-    const user = createUser(invite.householdId, email, invite.role);
-    markInviteAccepted(invite.householdId, email);
+    const user = await createUser(invite.householdId, email, invite.role);
+    await markInviteAccepted(invite.householdId, email);
     return user;
   }
 
@@ -137,19 +146,20 @@ function resolveUserOnLogin(email: string): User {
 // --- Sessions ----------------------------------------------------------------
 
 /** Create a session and return the plaintext token to store in the cookie. */
-export function createSession(userId: string): string {
+export async function createSession(userId: string): Promise<string> {
   const token = randomBytes(32).toString("hex");
   const now = Date.now();
-  db.query(
+  await pool.query(
     `INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, last_used_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(
-    crypto.randomUUID(),
-    userId,
-    sha256(token),
-    new Date(now + SESSION_TTL_MS).toISOString(),
-    new Date(now).toISOString(),
-    new Date(now).toISOString()
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      crypto.randomUUID(),
+      userId,
+      sha256(token),
+      new Date(now + SESSION_TTL_MS).toISOString(),
+      new Date(now).toISOString(),
+      new Date(now).toISOString(),
+    ]
   );
   return token;
 }
@@ -158,34 +168,38 @@ export function createSession(userId: string): string {
  * Resolve the user for a session token, sliding the expiry forward (so active
  * users stay logged in indefinitely; inactive ones lapse after 90 days).
  */
-export function getSessionUser(token: string | undefined): User | null {
+export async function getSessionUser(token: string | undefined): Promise<User | null> {
   if (!token) return null;
 
-  const row = db
-    .query("SELECT * FROM sessions WHERE token_hash = ?")
-    .get(sha256(token)) as
-    | { id: string; user_id: string; expires_at: string }
-    | null;
+  const { rows } = await pool.query(
+    "SELECT * FROM sessions WHERE token_hash = $1",
+    [sha256(token)]
+  );
+  const row =
+    (rows as { id: string; user_id: string; expires_at: string }[])[0] ?? null;
   if (!row) return null;
 
   if (new Date(row.expires_at).getTime() < Date.now()) {
-    db.query("DELETE FROM sessions WHERE id = ?").run(row.id);
+    await pool.query("DELETE FROM sessions WHERE id = $1", [row.id]);
     return null;
   }
 
   const now = Date.now();
-  db.query("UPDATE sessions SET expires_at = ?, last_used_at = ? WHERE id = ?").run(
-    new Date(now + SESSION_TTL_MS).toISOString(),
-    new Date(now).toISOString(),
-    row.id
+  await pool.query(
+    "UPDATE sessions SET expires_at = $1, last_used_at = $2 WHERE id = $3",
+    [
+      new Date(now + SESSION_TTL_MS).toISOString(),
+      new Date(now).toISOString(),
+      row.id,
+    ]
   );
 
   return getUserById(row.user_id);
 }
 
-export function destroySession(token: string | undefined): void {
+export async function destroySession(token: string | undefined): Promise<void> {
   if (!token) return;
-  db.query("DELETE FROM sessions WHERE token_hash = ?").run(sha256(token));
+  await pool.query("DELETE FROM sessions WHERE token_hash = $1", [sha256(token)]);
 }
 
 // --- Email delivery (Resend, with a console fallback for local dev) ----------

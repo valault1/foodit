@@ -8,6 +8,7 @@
     "dev:client": "bun run --cwd client dev",
     "dev:server": "bun run --cwd server dev",
     "build": "bun run --cwd client build",
-    "start": "bun run --cwd server start"
+    "start": "bun run --cwd server start",
+    "migrate": "bun run --cwd server migrate"
   }
 }

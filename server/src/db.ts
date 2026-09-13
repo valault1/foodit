@@ -1,6 +1,4 @@
-import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createPool } from "@vercel/postgres";
 
 // --- Domain types (camelCase over the wire) ---------------------------------
 
@@ -31,86 +29,16 @@ export interface RecipeInput {
   tags?: string[];
 }
 
-// --- Connection & schema -----------------------------------------------------
+// --- Connection --------------------------------------------------------------
+//
+// A single pooled client, built for serverless: `createPool()` reads
+// `POSTGRES_URL` from the environment (Vercel injects it in production; locally
+// it comes from `server/.env` — see VERCEL_MIGRATION_PLAN.md A6). The pool is
+// safe to hold at module scope and shared with the auth module (auth.ts).
+// Schema DDL lives in schema.ts and runs once via `bun run migrate` — never on
+// the request path. See ADR-008.
 
-const DB_PATH = process.env.FOODIT_DB ?? join(import.meta.dir, "..", "data", "foodit.db");
-mkdirSync(dirname(DB_PATH), { recursive: true });
-
-const db = new Database(DB_PATH);
-db.exec("PRAGMA journal_mode = WAL;");
-db.exec("PRAGMA foreign_keys = ON;");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS households (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS users (
-    id           TEXT PRIMARY KEY,
-    household_id TEXT NOT NULL REFERENCES households(id),
-    email        TEXT NOT NULL UNIQUE,
-    name         TEXT,
-    role         TEXT NOT NULL DEFAULT 'member', -- 'admin' | 'member'
-    created_at   TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS recipes (
-    id           TEXT PRIMARY KEY,
-    household_id TEXT NOT NULL REFERENCES households(id),
-    name         TEXT NOT NULL,
-    source_url   TEXT,
-    category     TEXT NOT NULL DEFAULT 'other',
-    ingredients  TEXT NOT NULL DEFAULT '[]', -- JSON array of strings
-    notes        TEXT NOT NULL DEFAULT '',
-    rating       INTEGER,                     -- 1..5 or NULL
-    tags         TEXT NOT NULL DEFAULT '[]',  -- JSON array of strings
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_recipes_household ON recipes(household_id);
-
-  -- Passwordless login: short-lived one-time codes emailed to a user.
-  CREATE TABLE IF NOT EXISTS login_codes (
-    id         TEXT PRIMARY KEY,
-    email      TEXT NOT NULL,
-    code_hash  TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    attempts   INTEGER NOT NULL DEFAULT 0,
-    consumed_at TEXT,
-    created_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_login_codes_email ON login_codes(email);
-
-  -- Long-lived sessions with sliding expiry (~90 days, refreshed on use).
-  CREATE TABLE IF NOT EXISTS sessions (
-    id           TEXT PRIMARY KEY,
-    user_id      TEXT NOT NULL REFERENCES users(id),
-    token_hash   TEXT NOT NULL UNIQUE,
-    expires_at   TEXT NOT NULL,
-    created_at   TEXT NOT NULL,
-    last_used_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
-
-  -- Pending invitations: an admin invites an email into their household.
-  CREATE TABLE IF NOT EXISTS invites (
-    id           TEXT PRIMARY KEY,
-    household_id TEXT NOT NULL REFERENCES households(id),
-    email        TEXT NOT NULL,
-    role         TEXT NOT NULL DEFAULT 'member',
-    invited_by   TEXT REFERENCES users(id),
-    created_at   TEXT NOT NULL,
-    accepted_at  TEXT,
-    UNIQUE(household_id, email)
-  );
-  CREATE INDEX IF NOT EXISTS idx_invites_email ON invites(email);
-`);
-
-// The raw database handle, shared with the auth module (server/src/auth.ts).
-export { db };
+export const pool = createPool();
 
 // --- Row mapping -------------------------------------------------------------
 
@@ -190,12 +118,16 @@ export interface ListOptions {
   category?: string;
 }
 
-export function listRecipes(householdId: string, opts: ListOptions = {}): Recipe[] {
-  const rows = db
-    .query("SELECT * FROM recipes WHERE household_id = ? ORDER BY updated_at DESC")
-    .all(householdId) as RecipeRow[];
+export async function listRecipes(
+  householdId: string,
+  opts: ListOptions = {}
+): Promise<Recipe[]> {
+  const { rows } = await pool.query(
+    "SELECT * FROM recipes WHERE household_id = $1 ORDER BY updated_at DESC",
+    [householdId]
+  );
 
-  let recipes = rows.map(rowToRecipe);
+  let recipes = (rows as RecipeRow[]).map(rowToRecipe);
 
   // Search is done in-process at household scale (see ADR-003).
   const q = opts.q?.trim().toLowerCase();
@@ -227,80 +159,88 @@ export function listRecipes(householdId: string, opts: ListOptions = {}): Recipe
   return recipes;
 }
 
-export function getRecipe(householdId: string, id: string): Recipe | null {
-  const row = db
-    .query("SELECT * FROM recipes WHERE household_id = ? AND id = ?")
-    .get(householdId, id) as RecipeRow | null;
+export async function getRecipe(householdId: string, id: string): Promise<Recipe | null> {
+  const { rows } = await pool.query(
+    "SELECT * FROM recipes WHERE household_id = $1 AND id = $2",
+    [householdId, id]
+  );
+  const row = (rows as RecipeRow[])[0] ?? null;
   return row ? rowToRecipe(row) : null;
 }
 
-export function createRecipe(householdId: string, input: RecipeInput): Recipe {
+export async function createRecipe(
+  householdId: string,
+  input: RecipeInput
+): Promise<Recipe> {
   const data = normalizeInput(input);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
 
-  db.query(
+  await pool.query(
     `INSERT INTO recipes
        (id, household_id, name, source_url, category, ingredients, notes, rating, tags, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    id,
-    householdId,
-    data.name,
-    data.sourceUrl,
-    data.category,
-    JSON.stringify(data.ingredients),
-    data.notes,
-    data.rating,
-    JSON.stringify(data.tags),
-    now,
-    now
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [
+      id,
+      householdId,
+      data.name,
+      data.sourceUrl,
+      data.category,
+      JSON.stringify(data.ingredients),
+      data.notes,
+      data.rating,
+      JSON.stringify(data.tags),
+      now,
+      now,
+    ]
   );
 
-  return getRecipe(householdId, id)!;
+  return (await getRecipe(householdId, id))!;
 }
 
-export function updateRecipe(
+export async function updateRecipe(
   householdId: string,
   id: string,
   input: RecipeInput
-): Recipe | null {
-  const existing = getRecipe(householdId, id);
+): Promise<Recipe | null> {
+  const existing = await getRecipe(householdId, id);
   if (!existing) return null;
 
   const data = normalizeInput({ ...existing, ...input });
   const now = new Date().toISOString();
 
-  db.query(
+  await pool.query(
     `UPDATE recipes SET
-       name = ?, source_url = ?, category = ?, ingredients = ?,
-       notes = ?, rating = ?, tags = ?, updated_at = ?
-     WHERE household_id = ? AND id = ?`
-  ).run(
-    data.name,
-    data.sourceUrl,
-    data.category,
-    JSON.stringify(data.ingredients),
-    data.notes,
-    data.rating,
-    JSON.stringify(data.tags),
-    now,
-    householdId,
-    id
+       name = $1, source_url = $2, category = $3, ingredients = $4,
+       notes = $5, rating = $6, tags = $7, updated_at = $8
+     WHERE household_id = $9 AND id = $10`,
+    [
+      data.name,
+      data.sourceUrl,
+      data.category,
+      JSON.stringify(data.ingredients),
+      data.notes,
+      data.rating,
+      JSON.stringify(data.tags),
+      now,
+      householdId,
+      id,
+    ]
   );
 
   return getRecipe(householdId, id);
 }
 
-export function deleteRecipe(householdId: string, id: string): boolean {
-  const result = db
-    .query("DELETE FROM recipes WHERE household_id = ? AND id = ?")
-    .run(householdId, id);
-  return result.changes > 0;
+export async function deleteRecipe(householdId: string, id: string): Promise<boolean> {
+  const result = await pool.query(
+    "DELETE FROM recipes WHERE household_id = $1 AND id = $2",
+    [householdId, id]
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
-export function listTags(householdId: string): string[] {
-  const recipes = listRecipes(householdId);
+export async function listTags(householdId: string): Promise<string[]> {
+  const recipes = await listRecipes(householdId);
   const set = new Set<string>();
   for (const r of recipes) for (const t of r.tags) set.add(t);
   return [...set].sort((a, b) => a.localeCompare(b));
@@ -361,60 +301,77 @@ function rowToUser(row: UserRow): User {
   };
 }
 
-export function getUserByEmail(email: string): User | null {
-  const row = db
-    .query("SELECT * FROM users WHERE email = ?")
-    .get(normalizeEmail(email)) as UserRow | null;
+export async function getUserByEmail(email: string): Promise<User | null> {
+  const { rows } = await pool.query("SELECT * FROM users WHERE email = $1", [
+    normalizeEmail(email),
+  ]);
+  const row = (rows as UserRow[])[0] ?? null;
   return row ? rowToUser(row) : null;
 }
 
-export function getUserById(id: string): User | null {
-  const row = db.query("SELECT * FROM users WHERE id = ?").get(id) as UserRow | null;
+export async function getUserById(id: string): Promise<User | null> {
+  const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [id]);
+  const row = (rows as UserRow[])[0] ?? null;
   return row ? rowToUser(row) : null;
 }
 
-export function listHouseholdMembers(householdId: string): User[] {
-  const rows = db
-    .query("SELECT * FROM users WHERE household_id = ? ORDER BY created_at ASC")
-    .all(householdId) as UserRow[];
-  return rows.map(rowToUser);
+export async function listHouseholdMembers(householdId: string): Promise<User[]> {
+  const { rows } = await pool.query(
+    "SELECT * FROM users WHERE household_id = $1 ORDER BY created_at ASC",
+    [householdId]
+  );
+  return (rows as UserRow[]).map(rowToUser);
 }
 
-export function getHousehold(id: string): Household | null {
-  const row = db.query("SELECT * FROM households WHERE id = ?").get(id) as
-    | { id: string; name: string; created_at: string }
-    | null;
+export async function getHousehold(id: string): Promise<Household | null> {
+  const { rows } = await pool.query("SELECT * FROM households WHERE id = $1", [id]);
+  const row = (rows as { id: string; name: string; created_at: string }[])[0] ?? null;
   return row ? { id: row.id, name: row.name, createdAt: row.created_at } : null;
 }
 
 /** Create a brand-new household with its first user as admin. */
-export function createHouseholdWithAdmin(email: string, name?: string): User {
+export async function createHouseholdWithAdmin(
+  email: string,
+  name?: string
+): Promise<User> {
   const now = new Date().toISOString();
   const householdId = crypto.randomUUID();
   const userId = crypto.randomUUID();
 
-  const tx = db.transaction(() => {
-    db.query("INSERT INTO households (id, name, created_at) VALUES (?, ?, ?)").run(
-      householdId,
-      name?.trim() || "My Household",
-      now
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "INSERT INTO households (id, name, created_at) VALUES ($1, $2, $3)",
+      [householdId, name?.trim() || "My Household", now]
     );
-    db.query(
-      "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES (?, ?, ?, ?, 'admin', ?)"
-    ).run(userId, householdId, normalizeEmail(email), name?.trim() || null, now);
-  });
-  tx();
+    await client.query(
+      "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES ($1, $2, $3, $4, 'admin', $5)",
+      [userId, householdId, normalizeEmail(email), name?.trim() || null, now]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 
-  return getUserById(userId)!;
+  return (await getUserById(userId))!;
 }
 
-export function createUser(householdId: string, email: string, role: Role): User {
+export async function createUser(
+  householdId: string,
+  email: string,
+  role: Role
+): Promise<User> {
   const now = new Date().toISOString();
   const userId = crypto.randomUUID();
-  db.query(
-    "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES (?, ?, ?, NULL, ?, ?)"
-  ).run(userId, householdId, normalizeEmail(email), role, now);
-  return getUserById(userId)!;
+  await pool.query(
+    "INSERT INTO users (id, household_id, email, name, role, created_at) VALUES ($1, $2, $3, NULL, $4, $5)",
+    [userId, householdId, normalizeEmail(email), role, now]
+  );
+  return (await getUserById(userId))!;
 }
 
 // --- Invites ---------------------------------------------------------------
@@ -441,50 +398,57 @@ function rowToInvite(row: InviteRow): Invite {
   };
 }
 
-export function getPendingInviteByEmail(email: string): Invite | null {
-  const row = db
-    .query("SELECT * FROM invites WHERE email = ? AND accepted_at IS NULL")
-    .get(normalizeEmail(email)) as InviteRow | null;
+export async function getPendingInviteByEmail(email: string): Promise<Invite | null> {
+  const { rows } = await pool.query(
+    "SELECT * FROM invites WHERE email = $1 AND accepted_at IS NULL",
+    [normalizeEmail(email)]
+  );
+  const row = (rows as InviteRow[])[0] ?? null;
   return row ? rowToInvite(row) : null;
 }
 
-export function createInvite(
+export async function createInvite(
   householdId: string,
   email: string,
   role: Role,
   invitedBy: string
-): Invite {
+): Promise<Invite> {
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   // Re-inviting the same email refreshes the pending invite rather than erroring.
-  db.query(
+  await pool.query(
     `INSERT INTO invites (id, household_id, email, role, invited_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT(household_id, email) DO UPDATE SET
        role = excluded.role, invited_by = excluded.invited_by,
-       created_at = excluded.created_at, accepted_at = NULL`
-  ).run(id, householdId, normalizeEmail(email), role, invitedBy, now);
-  return getPendingInviteByEmail(email)!;
+       created_at = excluded.created_at, accepted_at = NULL`,
+    [id, householdId, normalizeEmail(email), role, invitedBy, now]
+  );
+  return (await getPendingInviteByEmail(email))!;
 }
 
-export function listPendingInvites(householdId: string): Invite[] {
-  const rows = db
-    .query(
-      "SELECT * FROM invites WHERE household_id = ? AND accepted_at IS NULL ORDER BY created_at ASC"
-    )
-    .all(householdId) as InviteRow[];
-  return rows.map(rowToInvite);
+export async function listPendingInvites(householdId: string): Promise<Invite[]> {
+  const { rows } = await pool.query(
+    "SELECT * FROM invites WHERE household_id = $1 AND accepted_at IS NULL ORDER BY created_at ASC",
+    [householdId]
+  );
+  return (rows as InviteRow[]).map(rowToInvite);
 }
 
-export function markInviteAccepted(householdId: string, email: string): void {
-  db.query(
-    "UPDATE invites SET accepted_at = ? WHERE household_id = ? AND email = ?"
-  ).run(new Date().toISOString(), householdId, normalizeEmail(email));
+export async function markInviteAccepted(
+  householdId: string,
+  email: string
+): Promise<void> {
+  await pool.query(
+    "UPDATE invites SET accepted_at = $1 WHERE household_id = $2 AND email = $3",
+    [new Date().toISOString(), householdId, normalizeEmail(email)]
+  );
 }
 
-export function deleteInvite(householdId: string, id: string): boolean {
-  const result = db
-    .query("DELETE FROM invites WHERE household_id = ? AND id = ? AND accepted_at IS NULL")
-    .run(householdId, id);
-  return result.changes > 0;
+export async function deleteInvite(householdId: string, id: string): Promise<boolean> {
+  const result = await pool.query(
+    "DELETE FROM invites WHERE household_id = $1 AND id = $2 AND accepted_at IS NULL",
+    [householdId, id]
+  );
+  return (result.rowCount ?? 0) > 0;
 }
